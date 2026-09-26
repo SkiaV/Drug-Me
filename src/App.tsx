@@ -6,14 +6,16 @@ import {
   type FormEvent,
   type ReactNode,
 } from "react";
-import { getDashboard, getDrugReport, searchDrugs } from "./api";
-import { mockDrugs } from "./mockData";
-import type {
-  DemographicProfile,
-  DrugReport,
-  DrugSummary,
-  SearchFilters,
-} from "./types";
+import {
+  getDashboard,
+  getDrugReport,
+  searchDrugs,
+  type BackendStats,
+  type DemographicProfile,
+  type DrugReport,
+  type DrugSummary,
+  type SearchFilters,
+} from "./api";
 
 type Route = "dashboard" | "search" | "report";
 
@@ -27,12 +29,6 @@ const defaultFilters: SearchFilters = {
   ...defaultProfile,
   drug: "",
   indication: "",
-  status: "All statuses",
-  phase: "All phases",
-  location: "",
-  sponsor: "",
-  fromDate: "",
-  toDate: "",
 };
 
 function Icon({
@@ -251,7 +247,7 @@ function AppShell({
             ClinicalTrials.gov API v2
           </a>
           <a href="https://open.fda.gov/apis/drug/label/" rel="noreferrer" target="_blank">
-            openFDA drug labeling
+            openFDA drug labeling (not connected)
           </a>
         </div>
         <p>
@@ -293,8 +289,8 @@ function MethodologyNote() {
       <Icon name="info" />
       <p>
         <strong>How to read the score</strong>
-        Coverage compares available age, sex, and race enrollment data. Scores
-        are provisional while the methodology is under review.
+        Coverage uses protocol age eligibility, reported sex counts, and race
+        reporting. Scores are provisional while the methodology is under review.
       </p>
     </div>
   );
@@ -376,15 +372,20 @@ function DrugTable({
 
 function Dashboard({ navigate }: { navigate: (path: string) => void }) {
   const [drugs, setDrugs] = useState<DrugSummary[]>([]);
+  const [stats, setStats] = useState<BackendStats | null>(null);
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState("score-desc");
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
 
   useEffect(() => {
-    getDashboard().then((data) => {
-      setDrugs(data);
-      setLoading(false);
-    });
+    getDashboard()
+      .then(({ drugs, stats }) => {
+        setDrugs(drugs);
+        setStats(stats);
+      })
+      .catch((reason: unknown) => setError(reason instanceof Error ? reason.message : "Could not load the database."))
+      .finally(() => setLoading(false));
   }, []);
 
   const visibleDrugs = useMemo(() => {
@@ -410,20 +411,20 @@ function Dashboard({ navigate }: { navigate: (path: string) => void }) {
       <section className="metric-strip" aria-label="Evidence summary">
         <article>
           <small>Generic drugs reviewed</small>
-          <strong>1,248</strong>
+          <strong>{stats?.distinct_drugs.toLocaleString() ?? "—"}</strong>
         </article>
         <article>
           <small>Trials in the evidence base</small>
-          <strong>18,406</strong>
+          <strong>{stats?.studies.toLocaleString() ?? "—"}</strong>
         </article>
         <article>
-          <small>Overall coverage</small>
-          <strong>71%</strong>
+          <small>Trials reporting race</small>
+          <strong>{stats?.studies ? `${Math.round((stats.with_race_composition / stats.studies) * 100)}%` : "—"}</strong>
         </article>
         <article>
           <small>Evidence refreshed</small>
-          <strong>May 14, 2025</strong>
-          <span>Sample dataset</span>
+          <strong>{stats?.ingest?.loaded_at ? new Date(stats.ingest.loaded_at).toLocaleDateString() : "Not reported"}</strong>
+          <span>SQLite database</span>
         </article>
       </section>
 
@@ -457,7 +458,9 @@ function Dashboard({ navigate }: { navigate: (path: string) => void }) {
             </select>
           </label>
         </div>
-        {loading ? (
+        {error ? (
+          <div className="empty-state"><strong>Could not load trial data.</strong><span>{error}</span></div>
+        ) : loading ? (
           <div className="loading-state">Reviewing the evidence…</div>
         ) : visibleDrugs.length ? (
           <DrugTable drugs={visibleDrugs} navigate={navigate} />
@@ -471,9 +474,10 @@ function Dashboard({ navigate }: { navigate: (path: string) => void }) {
           <p>
             <Icon name="info" />
             Scores describe the completeness of demographic evidence—not drug
-            safety, efficacy, or treatment suitability.
+            safety, efficacy, or treatment suitability. Dashboard summaries use
+            the first 200 studies returned by the API.
           </p>
-          <span>{visibleDrugs.length} sample records shown</span>
+          <span>{visibleDrugs.length} medicines shown</span>
         </div>
       </section>
     </main>
@@ -548,6 +552,7 @@ function AdvancedSearch({ navigate }: { navigate: (path: string) => void }) {
   const [filters, setFilters] = useState<SearchFilters>(defaultFilters);
   const [results, setResults] = useState<DrugSummary[] | null>(null);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
 
   const update = (key: keyof SearchFilters, value: string | number) =>
     setFilters((current) => ({ ...current, [key]: value }));
@@ -555,8 +560,15 @@ function AdvancedSearch({ navigate }: { navigate: (path: string) => void }) {
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     setLoading(true);
-    setResults(await searchDrugs(filters));
-    setLoading(false);
+    setError("");
+    try {
+      setResults(await searchDrugs(filters));
+    } catch (reason) {
+      setResults([]);
+      setError(reason instanceof Error ? reason.message : "Could not search studies.");
+    } finally {
+      setLoading(false);
+    }
     window.setTimeout(
       () => document.getElementById("search-results")?.scrollIntoView({ behavior: "smooth" }),
       0,
@@ -566,7 +578,7 @@ function AdvancedSearch({ navigate }: { navigate: (path: string) => void }) {
   return (
     <main className="page">
       <PageIntro
-        description="Focus the representation score on a demographic profile, then narrow the evidence by medicine, use, study status, phase, sponsor, place, or date."
+        description="Focus the evidence search on a demographic profile, then narrow by medicine or condition."
         eyebrow="Advanced evidence search"
         title="Ask a more specific question."
       />
@@ -577,7 +589,7 @@ function AdvancedSearch({ navigate }: { navigate: (path: string) => void }) {
             <span>01</span>
             <div>
               <h2>Demographic profile</h2>
-              <p>Required. These values recalculate the score for this search only.</p>
+              <p>Choose a demographic profile to filter the available studies.</p>
             </div>
           </div>
           <ProfileFields
@@ -591,7 +603,7 @@ function AdvancedSearch({ navigate }: { navigate: (path: string) => void }) {
             <span>02</span>
             <div>
               <h2>Clinical filters</h2>
-              <p>Optional. Leave fields open to search the full sample evidence set.</p>
+              <p>Optionally narrow by medicine or condition.</p>
             </div>
           </div>
           <div className="clinical-fields">
@@ -611,65 +623,6 @@ function AdvancedSearch({ navigate }: { navigate: (path: string) => void }) {
                 value={filters.indication}
               />
             </label>
-            <label className="field">
-              <span>Study status</span>
-              <select
-                onChange={(event) => update("status", event.target.value)}
-                value={filters.status}
-              >
-                <option>All statuses</option>
-                <option>Recruiting</option>
-                <option>Active, not recruiting</option>
-                <option>Completed</option>
-                <option>Terminated</option>
-              </select>
-            </label>
-            <label className="field">
-              <span>Study phase</span>
-              <select
-                onChange={(event) => update("phase", event.target.value)}
-                value={filters.phase}
-              >
-                <option>All phases</option>
-                <option>Phase 1</option>
-                <option>Phase 2</option>
-                <option>Phase 3</option>
-                <option>Phase 4</option>
-                <option>Observational</option>
-              </select>
-            </label>
-            <label className="field">
-              <span>Location</span>
-              <input
-                onChange={(event) => update("location", event.target.value)}
-                placeholder="Country, state, or city"
-                value={filters.location}
-              />
-            </label>
-            <label className="field">
-              <span>Sponsor</span>
-              <input
-                onChange={(event) => update("sponsor", event.target.value)}
-                placeholder="Organization name"
-                value={filters.sponsor}
-              />
-            </label>
-            <label className="field">
-              <span>Study start from</span>
-              <input
-                onChange={(event) => update("fromDate", event.target.value)}
-                type="date"
-                value={filters.fromDate}
-              />
-            </label>
-            <label className="field">
-              <span>Study start to</span>
-              <input
-                onChange={(event) => update("toDate", event.target.value)}
-                type="date"
-                value={filters.toDate}
-              />
-            </label>
           </div>
         </section>
 
@@ -687,6 +640,7 @@ function AdvancedSearch({ navigate }: { navigate: (path: string) => void }) {
 
       {results && (
         <section className="evidence-section search-results" id="search-results">
+          {error && <div className="empty-state"><strong>Search failed.</strong><span>{error}</span></div>}
           <div className="section-heading">
             <div>
               <p className="eyebrow">Demographic-specific results</p>
@@ -733,23 +687,37 @@ function IndividualReport({ navigate }: { navigate: (path: string) => void }) {
   const initial = readReportState();
   const [drugId, setDrugId] = useState(initial.drugId);
   const [profile, setProfile] = useState<DemographicProfile>(initial.profile);
+  const [availableDrugs, setAvailableDrugs] = useState<DrugSummary[]>([]);
   const [report, setReport] = useState<DrugReport | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
 
   const loadReport = async (nextDrug = drugId, nextProfile = profile) => {
     setLoading(true);
-    const data = await getDrugReport(nextDrug, nextProfile);
-    setReport(data);
-    setLoading(false);
-    const params = new URLSearchParams({
-      age: String(nextProfile.age),
-      sex: nextProfile.sex,
-      race: nextProfile.race,
-    });
-    window.history.replaceState({}, "", `/report/${nextDrug}?${params}`);
+    setError("");
+    try {
+      const data = await getDrugReport(nextDrug, nextProfile);
+      setReport(data);
+      const params = new URLSearchParams({
+        age: String(nextProfile.age),
+        sex: nextProfile.sex,
+        race: nextProfile.race,
+      });
+      const nextUrl = `/report/${nextDrug}?${params}`;
+      if (`${window.location.pathname}${window.location.search}` !== nextUrl) {
+        window.history.replaceState({}, "", nextUrl);
+      }
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not load this report.");
+    } finally {
+      setLoading(false);
+    }
   };
 
   useEffect(() => {
+    getDashboard()
+      .then(({ drugs }) => setAvailableDrugs(drugs))
+      .catch((reason: unknown) => setError(reason instanceof Error ? reason.message : "Could not load medicines."));
     loadReport(initial.drugId, initial.profile);
   }, []);
 
@@ -770,14 +738,13 @@ function IndividualReport({ navigate }: { navigate: (path: string) => void }) {
         <label className="field">
           <span>Generic drug</span>
           <select onChange={(event) => setDrugId(event.target.value)} value={drugId}>
-            {mockDrugs
+            {!availableDrugs.some((drug) => drug.id === drugId) && report && (
+              <option value={drugId}>{report.drug.name}</option>
+            )}
+            {availableDrugs
               .slice()
               .sort((a, b) => a.name.localeCompare(b.name))
-              .map((drug) => (
-                <option key={drug.id} value={drug.id}>
-                  {drug.name}
-                </option>
-              ))}
+              .map((drug) => <option key={drug.id} value={drug.id}>{drug.name}</option>)}
           </select>
         </label>
         <ProfileFields onChange={setProfile} values={profile} />
@@ -786,6 +753,7 @@ function IndividualReport({ navigate }: { navigate: (path: string) => void }) {
         </Button>
       </form>
 
+      {error && <div className="empty-state"><strong>Report unavailable.</strong><span>{error}</span></div>}
       {loading ? (
         <div className="loading-state">Assembling the evidence report…</div>
       ) : report ? (
