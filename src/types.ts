@@ -39,10 +39,26 @@ export type SearchFilters = DemographicProfile & {
   indication: string;
   status: string;
   phase: string;
-  location: string;
-  sponsor: string;
   fromDate: string;
   toDate: string;
+};
+
+export type BackendStats = {
+  studies: number;
+  withResults: number;
+  withRaceComposition: number;
+  distinctDrugs: number;
+  distinctConditions: number;
+  ingest: {
+    finished_at?: string;
+    filters?: string;
+  } | null;
+};
+
+export type DashboardData = {
+  drugs: DrugSummary[];
+  stats: BackendStats;
+  source: "backend" | "sample";
 };
 
 export type EvidenceItem = {

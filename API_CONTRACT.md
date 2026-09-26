@@ -1,150 +1,102 @@
-# Clinical Trial Representation API Contract
+# Uploaded Flask Backend Integration
 
-The React app calls versioned REST endpoints under `/api/v1`. By default these
-are same-origin. Set `VITE_API_BASE_URL` when Flask is hosted separately, for
-example:
+The frontend is connected to the Flask application in `src/backend`.
+
+## Running locally
+
+Install the Python dependencies from the uploaded backend:
+
+```sh
+python -m pip install -r src/backend/requirements.txt
+```
+
+Populate the SQLite database:
+
+```sh
+pnpm backend:ingest
+```
+
+Start Flask on port 5001:
+
+```sh
+pnpm backend
+```
+
+The hosted Figma preview intentionally uses sample fallback data because it
+cannot run the Python process. To use Flask locally through the Vite proxy, set:
 
 ```text
-VITE_API_BASE_URL=http://localhost:5000
+VITE_USE_BACKEND=true
 ```
 
-When an endpoint is unavailable, the current frontend falls back to local sample
-data. Successful Flask responses replace that fallback without requiring UI
-changes.
+The Vite development server then proxies `/api/*` to
+`http://127.0.0.1:5001`. Override the proxy target with `BACKEND_URL`, or set
+`VITE_API_BASE_URL` when the browser should call a separately hosted Flask
+service directly. Supplying `VITE_API_BASE_URL` also enables backend requests.
 
-## Shared conventions
+## Backend routes used by the frontend
 
-- Request and response bodies use JSON and UTF-8.
-- Property names use `camelCase`.
-- Dates use ISO 8601 `YYYY-MM-DD`.
-- Scores and coverage components are integer percentages from `0` to `100`.
-- Drug IDs are stable URL-safe generic-drug identifiers.
-- Brand products should be normalized under their active generic ingredient.
-- CORS must allow the Vite origin when Flask is hosted separately.
-- Errors should return `{ "error": { "code": string, "message": string } }`.
+### `GET /api/studies`
 
-## Drug summary
+Used for the generalized dashboard, advanced search, and report evidence.
 
-```json
-{
-  "id": "fluoxetine",
-  "name": "Fluoxetine",
-  "primaryUse": "Major depressive disorder",
-  "otherUses": ["Panic disorder", "Bulimia nervosa"],
-  "leastResearched": {
-    "dimension": "Race",
-    "group": "Black participants"
-  },
-  "score": 62,
-  "tier": "Developing",
-  "components": {
-    "age": 71,
-    "sex": 79,
-    "race": 38
-  },
-  "trialCount": 128,
-  "participantCount": 28410,
-  "updatedAt": "2025-05-14"
-}
-```
+Supported backend query parameters:
 
-`tier` must be one of `Limited`, `Developing`, or `Strong`.
+- `drug`
+- `condition`
+- `sex`: `Male` or `Female`
+- `age`: integer
+- `race`: harmonized backend category such as `white`, `black`, `asian`,
+  `aian`, `nhpi`, or `multiracial`
+- `has_results`: `0` or `1`
+- `limit`: capped by the backend at 200
+- `offset`
 
-## GET `/api/v1/drugs`
+The frontend translates its display values to these parameters. Study status,
+phase, and start-date filters are applied to the returned study page because
+the uploaded route does not currently accept them as query parameters.
 
-Returns generalized representation summaries.
+### `GET /api/studies/aggregate`
 
-Optional query parameters:
+Used by individualized reports to obtain:
 
-- `query`: generic drug name or use
-- `sort`: `score`, `name`, or `trialCount`
-- `order`: `asc` or `desc`
-- `limit`: requested page size
-- `cursor`: opaque pagination cursor
+- Matching study and participant counts
+- Female and male participant counts
+- Age eligibility envelope
+- Race composition
+- Number of studies reporting race
 
-The frontend currently accepts a direct array of drug summaries. A later
-pagination iteration can wrap this in an object with `items` and `nextCursor`.
+### `GET /api/studies/stats`
 
-## GET `/api/v1/search`
+Used for live dashboard totals and the latest ingest timestamp.
 
-Returns drug summaries with `score` and `tier` recalculated for the selected
-demographic profile.
+### `GET /api/studies/:nct_id`
 
-Required query parameters:
+Available for future study-detail views. The current report links directly to
+the ClinicalTrials.gov `source_url` supplied by each study record.
 
-- `age`: integer from 0 to 120
-- `sex`: `Female`, `Male`, or `All or not specified`
-- `race`: one of:
-  - `American Indian or Alaska Native`
-  - `Asian`
-  - `Black or African American`
-  - `Multiracial`
-  - `Native Hawaiian or Pacific Islander`
-  - `White`
-  - `All or not specified`
+## Frontend adaptation
 
-Optional query parameters:
+The uploaded backend is study-oriented while the dashboard is drug-oriented.
+`src/api.ts` groups returned studies by the normalized generic/MeSH drug name
+and derives the presentation model:
 
-- `drug`: generic drug name
-- `indication`: use or condition
-- `status`: ClinicalTrials.gov study status
-- `phase`: study phase or `Observational`
-- `location`: country, state, or city
-- `sponsor`: sponsor or collaborator
-- `fromDate`: study start lower bound
-- `toDate`: study start upper bound
+- The most common condition becomes the primary use.
+- Trial and participant counts are aggregated per generic drug.
+- Age coverage uses the study eligibility envelope.
+- Sex coverage uses reported female/male counts when available.
+- Race coverage measures how many matching studies report race composition.
+- The provisional overall score is the mean of those three components.
 
-Response: an array of drug summaries in the same shape as `/drugs`.
+These calculations are explicitly provisional and can be replaced when the
+final scoring methodology is defined.
 
-## GET `/api/v1/drugs/:drugId/report`
+## Missing backend capability
 
-Returns the evidence report for one normalized generic drug and demographic
-profile.
+The uploaded backend contains ClinicalTrials.gov data but no openFDA route.
+The report identifies FDA labeling as unavailable rather than presenting mock
+label content as backend data.
 
-Required query parameters: `age`, `sex`, and `race`, using the values described
-for `/search`.
-
-```json
-{
-  "drug": {},
-  "profile": {
-    "age": 67,
-    "sex": "Female",
-    "race": "Black or African American"
-  },
-  "personalizedScore": 51,
-  "summary": "Plain-language evidence interpretation.",
-  "strengths": ["Evidence strength"],
-  "gaps": ["Evidence limitation"],
-  "fdaContext": {
-    "indication": "Major depressive disorder",
-    "labelUpdated": "2024-11-19",
-    "note": "FDA labeling context.",
-    "sourceUrl": "https://open.fda.gov/apis/drug/label/"
-  },
-  "evidence": [
-    {
-      "id": "NCT05824182",
-      "title": "Trial title",
-      "phase": "Phase 4",
-      "status": "Completed",
-      "enrollment": 2480,
-      "match": "High relevance",
-      "sourceUrl": "https://clinicaltrials.gov/"
-    }
-  ]
-}
-```
-
-The `drug` property contains the complete shared drug-summary shape.
-
-## Source and methodology expectations
-
-- Clinical trial records should be retrieved from ClinicalTrials.gov API v2.
-- FDA indication and labeling context should come from the openFDA drug-label
-  endpoint.
-- Store source record IDs and source URLs so report evidence is auditable.
-- Scores must remain marked provisional until the scoring methodology is
-  finalized.
-- Missing demographic reporting should reduce data confidence rather than be
-  interpreted as zero enrollment.
+If Flask cannot be reached, the UI keeps a clearly labeled sample fallback so
+the preview remains usable. When Flask responds successfully, the dashboard
+labels its source as **Flask backend** and uses backend-derived values.

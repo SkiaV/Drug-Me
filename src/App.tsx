@@ -3,12 +3,22 @@ import {
   useMemo,
   useState,
   type CSSProperties,
+  type ChangeEvent,
   type FormEvent,
   type ReactNode,
 } from "react";
 import { getDashboard, getDrugReport, searchDrugs } from "./api";
+
+declare global {
+  namespace JSX {
+    interface IntrinsicElements {
+      [elemName: string]: any;
+    }
+  }
+}
 import { mockDrugs } from "./mockData";
 import type {
+  BackendStats,
   DemographicProfile,
   DrugReport,
   DrugSummary,
@@ -29,8 +39,6 @@ const defaultFilters: SearchFilters = {
   indication: "",
   status: "All statuses",
   phase: "All phases",
-  location: "",
-  sponsor: "",
   fromDate: "",
   toDate: "",
 };
@@ -376,19 +384,38 @@ function DrugTable({
 
 function Dashboard({ navigate }: { navigate: (path: string) => void }) {
   const [drugs, setDrugs] = useState<DrugSummary[]>([]);
+  const [stats, setStats] = useState<BackendStats | null>(null);
+  const [dataSource, setDataSource] = useState<"backend" | "sample">("sample");
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState("score-desc");
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     getDashboard().then((data) => {
-      setDrugs(data);
+      const runtimeData = data as unknown;
+      const nextDrugs = Array.isArray(runtimeData)
+        ? runtimeData
+        : typeof runtimeData === "object" &&
+            runtimeData !== null &&
+            Array.isArray((runtimeData as { drugs?: unknown }).drugs)
+          ? (runtimeData as { drugs: DrugSummary[] }).drugs
+          : [];
+      setDrugs(nextDrugs);
+      if (!Array.isArray(runtimeData) && runtimeData && typeof runtimeData === "object") {
+        const dashboardData = runtimeData as {
+          stats?: BackendStats;
+          source?: "backend" | "sample";
+        };
+        setStats(dashboardData.stats ?? null);
+        setDataSource(dashboardData.source ?? "sample");
+      }
       setLoading(false);
     });
   }, []);
 
   const visibleDrugs = useMemo(() => {
-    const filtered = drugs.filter((drug) =>
+    const safeDrugs = Array.isArray(drugs) ? drugs : [];
+    const filtered = safeDrugs.filter((drug) =>
       `${drug.name} ${drug.primaryUse}`.toLowerCase().includes(query.toLowerCase()),
     );
     return [...filtered].sort((a, b) => {
@@ -410,20 +437,28 @@ function Dashboard({ navigate }: { navigate: (path: string) => void }) {
       <section className="metric-strip" aria-label="Evidence summary">
         <article>
           <small>Generic drugs reviewed</small>
-          <strong>1,248</strong>
+          <strong>{stats?.distinctDrugs.toLocaleString() ?? "—"}</strong>
         </article>
         <article>
           <small>Trials in the evidence base</small>
-          <strong>18,406</strong>
+          <strong>{stats?.studies.toLocaleString() ?? "—"}</strong>
         </article>
         <article>
-          <small>Overall coverage</small>
-          <strong>71%</strong>
+          <small>Trials reporting race</small>
+          <strong>
+            {stats?.studies
+              ? `${Math.round((stats.withRaceComposition / stats.studies) * 100)}%`
+              : "—"}
+          </strong>
         </article>
         <article>
           <small>Evidence refreshed</small>
-          <strong>May 14, 2025</strong>
-          <span>Sample dataset</span>
+          <strong>
+            {stats?.ingest?.finished_at
+              ? new Date(stats.ingest.finished_at).toLocaleDateString()
+              : "Not reported"}
+          </strong>
+          <span>{dataSource === "backend" ? "Flask backend" : "Sample fallback"}</span>
         </article>
       </section>
 
@@ -566,7 +601,7 @@ function AdvancedSearch({ navigate }: { navigate: (path: string) => void }) {
   return (
     <main className="page">
       <PageIntro
-        description="Focus the representation score on a demographic profile, then narrow the evidence by medicine, use, study status, phase, sponsor, place, or date."
+        description="Focus the representation score on a demographic profile, then narrow the uploaded evidence by medicine, use, study status, phase, or start date."
         eyebrow="Advanced evidence search"
         title="Ask a more specific question."
       />
@@ -637,22 +672,6 @@ function AdvancedSearch({ navigate }: { navigate: (path: string) => void }) {
                 <option>Phase 4</option>
                 <option>Observational</option>
               </select>
-            </label>
-            <label className="field">
-              <span>Location</span>
-              <input
-                onChange={(event) => update("location", event.target.value)}
-                placeholder="Country, state, or city"
-                value={filters.location}
-              />
-            </label>
-            <label className="field">
-              <span>Sponsor</span>
-              <input
-                onChange={(event) => update("sponsor", event.target.value)}
-                placeholder="Organization name"
-                value={filters.sponsor}
-              />
             </label>
             <label className="field">
               <span>Study start from</span>
