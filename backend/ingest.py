@@ -1,16 +1,19 @@
-"""Pull every Phase 3 study from ClinicalTrials.gov and load the six schema fields into SQLite.
+"""Pull completed Phase 3 studies from ClinicalTrials.gov and load them into SQLite (schema.sql).
 
     python ingest.py                          # download every page to data/raw, then load data/studies.db
     python ingest.py --load-only              # skip the download; re-parse whatever is already in data/raw
-    python ingest.py --raw-dir ../Drug_Me_Finder/backend/data/raw --load-only   # reuse the harvest the team already has
+    python ingest.py --raw-dir <the team's data/raw> --load-only   # reuse pages that were already downloaded
     python ingest.py --max-pages 1            # smoke test: the first 1,000 studies only
-    python ingest.py --agg-filters phase:3    # every Phase 3 study, including those without posted results
+    python ingest.py --rebuild                # drop the tables first (needed once after a schema change)
 
-Re-running is safe: studies are upserted by NCT number and their child rows rebuilt.
+Scope is enforced here, as schema.sql says: a study that is not COMPLETED, does not list PHASE3, or has no
+non-placebo drug, no condition or no participant count is skipped, and the skips are counted by reason in
+meta.ingest. Re-running is safe: studies are upserted by NCT number and their child rows rebuilt.
 """
 from __future__ import annotations
 
 import argparse
+import collections
 import datetime as dt
 import pathlib
 import sys
@@ -18,20 +21,22 @@ import time
 
 import ctgov_client
 import db
-from config import AGG_FILTERS, DB_PATH, RAW_DIR
-from parse_study import parse_study
+from config import AGG_FILTERS, DB_PATH, RAW_DIR, SCOPE_PHASE, SCOPE_STATUS
+from parse_study import SkipStudy, parse_study
 
 BATCH = 1000
 
 
-def load(con, raw_dir: pathlib.Path, fetched_at: str, log=print) -> tuple[int, int]:
-    """Parse every saved page into the database. Returns (loaded, skipped)."""
-    batch, loaded, skipped, started = [], 0, 0, time.time()
+def load(con, raw_dir: pathlib.Path, log=print) -> tuple[int, collections.Counter]:
+    """Parse every saved page into the database. Returns (loaded, skipped-by-reason)."""
+    batch, loaded, skipped, started = [], 0, collections.Counter(), time.time()
     for study in ctgov_client.iter_raw_studies(raw_dir):
         try:
-            batch.append(parse_study(study, fetched_at))
+            batch.append(parse_study(study))
+        except SkipStudy as exc:                     # out of scope, or a NOT NULL column cannot be filled
+            skipped[exc.reason] += 1
         except Exception as exc:                     # one malformed study must not stop the load
-            skipped += 1
+            skipped["error"] += 1
             nct = ((study.get("protocolSection") or {}).get("identificationModule") or {}).get("nctId")
             log(f"skip {nct}: {exc}")
         if len(batch) >= BATCH:
@@ -52,6 +57,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--agg-filters", default=AGG_FILTERS, help='ClinicalTrials.gov aggFilters, e.g. "phase:3"')
     parser.add_argument("--max-pages", type=int, default=None, help="stop after this many pages (smoke test)")
     parser.add_argument("--load-only", action="store_true", help="do not download; parse the saved pages")
+    parser.add_argument("--rebuild", action="store_true", help="drop the tables before loading (once, after a schema change)")
     args = parser.parse_args(argv)
 
     if not args.load_only:
@@ -61,14 +67,23 @@ def main(argv: list[str] | None = None) -> int:
         print(f"no ctgov_page_*.json in {args.raw_dir}; run without --load-only first", file=sys.stderr)
         return 1
 
-    fetched_at = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
     con = db.connect(args.db)
+    if args.rebuild:
+        db.drop_all(con)
+    elif not db.schema_is_current(con):
+        print(f"{args.db} was built with an earlier schema.sql; run again with --rebuild (or delete the file)",
+              file=sys.stderr)
+        con.close()
+        return 1
     db.init_schema(con)
-    loaded, skipped = load(con, args.raw_dir, fetched_at)
-    db.set_meta(con, "ingest", {"studies": loaded, "skipped": skipped, "fetched_at": fetched_at,
-                                "agg_filters": args.agg_filters, "raw_dir": str(args.raw_dir)})
+    loaded_at = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+    loaded, skipped = load(con, args.raw_dir)
+    db.set_meta(con, "ingest", {"studies": loaded, "skipped": dict(skipped), "loaded_at": loaded_at,
+                                "agg_filters": args.agg_filters, "raw_dir": str(args.raw_dir),
+                                "scope": {"status": SCOPE_STATUS, "phase": SCOPE_PHASE}})
     con.close()
-    print(f"done: {loaded} studies in {args.db} ({skipped} skipped)")
+    reasons = ", ".join(f"{reason} {n}" for reason, n in skipped.most_common()) or "none"
+    print(f"done: {loaded} studies in {args.db}; skipped {sum(skipped.values())} ({reasons})")
     return 0
 
 

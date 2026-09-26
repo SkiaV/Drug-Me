@@ -5,6 +5,7 @@ import type {
   DemographicProfile,
   DrugReport,
   DrugSummary,
+  EvidenceItem,
   SearchFilters,
 } from "./types";
 
@@ -22,25 +23,23 @@ type BackendRace = {
   dimension: "race" | "ethnicity";
 };
 
+/**
+ * One `studies` row as `GET /api/studies` returns it: the columns of backend/schema.sql plus
+ * `source_url`, which the API derives from the NCT number, and the study's race rows.
+ */
 type BackendStudy = {
   nct_id: string;
-  title: string;
-  drug: string | null;
-  drug_mesh: string | null;
-  condition: string | null;
-  sex: string;
-  age_min: number;
-  age_max: number;
+  drug: string;
+  drug_mesh: string;
+  condition: string;
+  sex: "M" | "F" | "MF";
+  age_lower: number | null;
+  age_upper: number | null;
   female_count: number | null;
   male_count: number | null;
-  participants: number | null;
-  phase: string | null;
-  status: string | null;
-  start_date: string | null;
-  has_results: number;
-  race_reported: number;
+  participants: number;
+  race_reported: 0 | 1;
   source_url: string;
-  fetched_at: string;
   race_composition: BackendRace[];
 };
 
@@ -48,34 +47,42 @@ type StudiesResponse = {
   total: number;
   limit: number;
   offset: number;
+  filters: Record<string, string | number>;
   studies: BackendStudy[];
 };
 
 type StatsResponse = {
   studies: number;
-  with_results: number;
+  participants: number;
   with_race_composition: number;
   distinct_drugs: number;
-  distinct_conditions: number;
   ingest: BackendStats["ingest"];
 };
 
 type AggregateResponse = {
   studies: number;
-  participants: number | null;
+  participants: number;
   studies_reporting_race: number;
-  sex_counts: { female: number | null; male: number | null };
+  sex: { female: number | null; male: number | null };
   age_range: [number | null, number | null];
-  race_composition: Array<BackendRace & { studies: number }>;
+  race_composition: Array<{
+    dimension: "race" | "ethnicity";
+    category: string;
+    count: number;
+    studies: number;
+  }>;
 };
 
+// The totals of the 2026-09-26 load (11,976 completed Phase 3 studies with posted results).
 const fallbackStats: BackendStats = {
-  studies: 18406,
-  withResults: 14776,
-  withRaceComposition: 10418,
-  distinctDrugs: 1248,
-  distinctConditions: 2906,
-  ingest: { finished_at: "2025-05-14T12:00:00Z" },
+  studies: 11976,
+  participants: 8866877,
+  withRaceComposition: 6869,
+  distinctDrugs: 5850,
+  ingest: {
+    loaded_at: "2026-09-26T19:28:36+00:00",
+    scope: { status: "COMPLETED", phase: "PHASE3" },
+  },
 };
 
 async function request<T>(path: string): Promise<T> {
@@ -100,6 +107,7 @@ function titleCase(value: string) {
     .replace(/\bOr\b/g, "or");
 }
 
+/** The first MeSH-normalized drug of a study, dose stripped, as the dashboard's grouping key. */
 function genericName(study: BackendStudy) {
   const candidate = (study.drug_mesh || study.drug || "").split(";")[0]?.trim();
   if (!candidate) return null;
@@ -117,7 +125,24 @@ function tierFor(score: number): DrugSummary["tier"] {
   return "Limited";
 }
 
-function toDrugSummaries(studies: BackendStudy[]): DrugSummary[] {
+/** Eligibility span in years; a missing bound means no bound (0 or 100 for this purpose). */
+function ageSpan(study: BackendStudy) {
+  return Math.min(100, Math.max(0, (study.age_upper ?? 100) - (study.age_lower ?? 0)));
+}
+
+function describeSex(sex: BackendStudy["sex"]) {
+  return sex === "F" ? "Female only" : sex === "M" ? "Male only" : "Female and male";
+}
+
+function describeAge(study: BackendStudy) {
+  const { age_lower: lower, age_upper: upper } = study;
+  if (lower === null && upper === null) return "Any age";
+  if (upper === null) return `${lower} and older`;
+  if (lower === null) return `Up to ${upper}`;
+  return `${lower} to ${upper}`;
+}
+
+function toDrugSummaries(studies: BackendStudy[], updatedAt?: string): DrugSummary[] {
   if (!Array.isArray(studies)) return [];
   const groups = new Map<string, BackendStudy[]>();
   for (const study of studies) {
@@ -127,12 +152,9 @@ function toDrugSummaries(studies: BackendStudy[]): DrugSummary[] {
   }
 
   return [...groups.entries()].map(([name, rows]) => {
-    const participantCount = rows.reduce(
-      (sum, row) => sum + (row.participants ?? 0),
-      0,
-    );
+    const participantCount = rows.reduce((sum, row) => sum + row.participants, 0);
     const uses = rows
-      .flatMap((row) => (row.condition ?? "").split(";"))
+      .flatMap((row) => row.condition.split(";"))
       .map((use) => use.trim())
       .filter(Boolean);
     const useCounts = new Map<string, number>();
@@ -142,21 +164,14 @@ function toDrugSummaries(studies: BackendStudy[]): DrugSummary[] {
       .map(([use]) => use);
 
     const ageCoverage = Math.round(
-      rows.reduce(
-        (sum, row) => sum + Math.min(100, Math.max(0, row.age_max - row.age_min)),
-        0,
-      ) / rows.length,
+      rows.reduce((sum, row) => sum + ageSpan(row), 0) / rows.length,
     );
     const female = rows.reduce((sum, row) => sum + (row.female_count ?? 0), 0);
     const male = rows.reduce((sum, row) => sum + (row.male_count ?? 0), 0);
     const sexCoverage =
       female && male
         ? Math.round((Math.min(female, male) / Math.max(female, male)) * 100)
-        : Math.round(
-            (rows.filter((row) => row.sex === "Male and Female").length /
-              rows.length) *
-              100,
-          );
+        : Math.round((rows.filter((row) => row.sex === "MF").length / rows.length) * 100);
     const raceCoverage = Math.round(
       (rows.filter((row) => row.race_reported).length / rows.length) * 100,
     );
@@ -187,13 +202,12 @@ function toDrugSummaries(studies: BackendStudy[]): DrugSummary[] {
       components,
       trialCount: rows.length,
       participantCount,
-      updatedAt:
-        rows.map((row) => row.fetched_at).filter(Boolean).sort().slice(-1)[0] ??
-        new Date().toISOString(),
+      updatedAt: updatedAt ?? new Date().toISOString(),
     };
   });
 }
 
+/** Display race -> the backend's harmonized `study_races.category`. */
 function raceCategory(race: DemographicProfile["race"]) {
   const categories: Partial<Record<DemographicProfile["race"], string>> = {
     "American Indian or Alaska Native": "aian",
@@ -206,40 +220,35 @@ function raceCategory(race: DemographicProfile["race"]) {
   return categories[race];
 }
 
+/**
+ * The backend's query string. Sex travels as the schema code (F or M; a mixed-sex study matches
+ * either), race as a category. "All or not specified" sends nothing.
+ */
 function backendParams(
   profile?: DemographicProfile,
   filters?: Partial<SearchFilters>,
 ) {
   const params = new URLSearchParams({ limit: "200" });
-  if (filters?.drug) params.set("drug", filters.drug);
-  if (filters?.indication) params.set("condition", filters.indication);
+  if (filters?.drug) params.set("drug", filters.drug.trim());
+  if (filters?.indication) params.set("condition", filters.indication.trim());
   if (profile?.age !== undefined && profile.age >= 0) {
     params.set("age", String(profile.age));
   }
-  if (profile?.sex && profile.sex !== "All or not specified") {
-    params.set("sex", profile.sex);
-  }
+  if (profile?.sex === "Female") params.set("sex", "F");
+  if (profile?.sex === "Male") params.set("sex", "M");
   const race = profile ? raceCategory(profile.race) : undefined;
   if (race) params.set("race", race);
   return params;
 }
 
-function clientFilter(studies: BackendStudy[], filters: SearchFilters) {
-  return studies.filter((study) => {
-    const statusMatches =
-      filters.status === "All statuses" ||
-      study.status?.replace(/_/g, " ").toLowerCase() ===
-        filters.status.toLowerCase();
-    const phaseMatches =
-      filters.phase === "All phases" ||
-      study.phase?.replace(/_/g, " ").toLowerCase() ===
-        filters.phase.replace(" ", "").toLowerCase();
-    const fromMatches =
-      !filters.fromDate || !study.start_date || study.start_date >= filters.fromDate;
-    const toMatches =
-      !filters.toDate || !study.start_date || study.start_date <= filters.toDate;
-    return statusMatches && phaseMatches && fromMatches && toMatches;
-  });
+function toStats(stats: StatsResponse): BackendStats {
+  return {
+    studies: stats.studies,
+    participants: stats.participants,
+    withRaceComposition: stats.with_race_composition,
+    distinctDrugs: stats.distinct_drugs,
+    ingest: stats.ingest,
+  };
 }
 
 export async function getDashboard(): Promise<DashboardData> {
@@ -248,22 +257,15 @@ export async function getDashboard(): Promise<DashboardData> {
   }
   try {
     const [studyData, statsData] = await Promise.all([
-      request<StudiesResponse>("?limit=200&has_results=1"),
+      request<StudiesResponse>("?limit=200"),
       request<StatsResponse>("/stats"),
     ]);
     if (!Array.isArray(studyData?.studies) || !statsData) {
       throw new Error("Backend returned an invalid dashboard response");
     }
     return {
-      drugs: toDrugSummaries(studyData.studies),
-      stats: {
-        studies: statsData.studies,
-        withResults: statsData.with_results,
-        withRaceComposition: statsData.with_race_composition,
-        distinctDrugs: statsData.distinct_drugs,
-        distinctConditions: statsData.distinct_conditions,
-        ingest: statsData.ingest,
-      },
+      drugs: toDrugSummaries(studyData.studies, statsData.ingest?.loaded_at),
+      stats: toStats(statsData),
       source: "backend",
     };
   } catch {
@@ -276,10 +278,8 @@ export async function searchDrugs(filters: SearchFilters): Promise<DrugSummary[]
     return sampleSearch(filters);
   }
   try {
-    const params = backendParams(filters, filters);
-    params.set("has_results", "1");
-    const data = await request<StudiesResponse>(`?${params}`);
-    return toDrugSummaries(clientFilter(data.studies, filters));
+    const data = await request<StudiesResponse>(`?${backendParams(filters, filters)}`);
+    return toDrugSummaries(data.studies);
   } catch {
     return sampleSearch(filters);
   }
@@ -298,6 +298,20 @@ function sampleSearch(filters: SearchFilters) {
         : true)
     );
   });
+}
+
+function toEvidence(study: BackendStudy): EvidenceItem {
+  const condition = study.condition.split(";")[0]?.trim() || "condition not listed";
+  return {
+    id: study.nct_id,
+    title: `${study.drug} for ${condition}`,
+    drug: study.drug_mesh,
+    participants: study.participants,
+    sex: describeSex(study.sex),
+    ageRange: describeAge(study),
+    match: study.race_reported ? "Race reported" : "Race not reported",
+    sourceUrl: study.source_url,
+  };
 }
 
 export async function getDrugReport(
@@ -319,7 +333,6 @@ export async function getDrugReport(
 
   try {
     const params = backendParams(profile, { drug: requestedName });
-    params.set("has_results", "1");
     const [studyData, aggregate] = await Promise.all([
       request<StudiesResponse>(`?${params}`),
       request<AggregateResponse>(`/aggregate?${params}`),
@@ -329,7 +342,7 @@ export async function getDrugReport(
       ({ ...fallbackDrug, name: titleCase(requestedName) } as DrugSummary);
     const targetRace = raceCategory(profile.race);
     const raceEntry = aggregate.race_composition.find(
-      (item) => item.category === targetRace,
+      (item) => item.dimension === "race" && item.category === targetRace,
     );
     const raceTotal = aggregate.race_composition
       .filter((item) => item.dimension === "race")
@@ -341,15 +354,23 @@ export async function getDrugReport(
     const personalizedScore = Math.round(
       (drug.components.age + drug.components.sex + targetRaceCoverage) / 3,
     );
+    const [ageLower, ageUpper] = aggregate.age_range;
+    const envelope =
+      aggregate.studies === 0
+        ? "No study sets an age envelope."
+        : ageUpper === null
+          ? `Eligibility starts as low as age ${ageLower ?? 0}, and at least one study set no upper age limit.`
+          : `Eligibility spans ages ${ageLower ?? 0} to ${ageUpper} across the matching studies.`;
 
     return {
       drug,
       profile,
       personalizedScore,
-      summary: `${studyData.total} studies in the uploaded ClinicalTrials.gov dataset match ${drug.name} and the selected eligibility profile. ${aggregate.studies_reporting_race} of those studies report race composition.`,
+      summary: `${studyData.total} completed Phase 3 studies with posted results match ${drug.name} and the selected eligibility profile. ${aggregate.studies_reporting_race} of those studies report race composition.`,
       strengths: [
-        `${(aggregate.participants ?? 0).toLocaleString()} participants are represented across the matching evidence set.`,
+        `${aggregate.participants.toLocaleString()} participants are represented across the matching evidence set.`,
         `${aggregate.studies_reporting_race} matching studies report race composition.`,
+        envelope,
       ],
       gaps: [
         `${Math.max(0, aggregate.studies - aggregate.studies_reporting_race)} matching studies do not report usable race composition.`,
@@ -358,18 +379,10 @@ export async function getDrugReport(
       fdaContext: {
         indication: drug.primaryUse,
         labelUpdated: "Not available",
-        note: "The uploaded backend currently provides ClinicalTrials.gov evidence only. An openFDA labeling endpoint has not yet been included.",
+        note: "The backend provides ClinicalTrials.gov evidence only. FDA labeling is not part of the current data plan.",
         sourceUrl: "https://open.fda.gov/apis/drug/label/",
       },
-      evidence: studyData.studies.slice(0, 8).map((study) => ({
-        id: study.nct_id,
-        title: study.title,
-        phase: titleCase((study.phase ?? "Not reported").replace(/_/g, " ")),
-        status: titleCase((study.status ?? "Not reported").replace(/_/g, " ")),
-        enrollment: study.participants ?? 0,
-        match: study.race_reported ? "Demographics reported" : "Limited reporting",
-        sourceUrl: study.source_url,
-      })),
+      evidence: studyData.studies.slice(0, 8).map(toEvidence),
     };
   } catch {
     return sampleReport(fallbackDrug, profile);
@@ -394,7 +407,7 @@ function sampleReport(
     fdaContext: {
       indication: drug.primaryUse,
       labelUpdated: "Not available",
-      note: "FDA labeling is not included in the uploaded backend.",
+      note: "FDA labeling is not included in the backend.",
       sourceUrl: "https://open.fda.gov/apis/drug/label/",
     },
     evidence: [],

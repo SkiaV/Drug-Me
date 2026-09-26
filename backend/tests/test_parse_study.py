@@ -1,9 +1,9 @@
 """Unit tests for parse_study.py against real ClinicalTrials.gov API v2 shapes (trimmed from live studies)."""
+import copy
+
 import pytest
 
 import parse_study as ps
-
-FETCHED = "2026-09-26T00:00:00+00:00"
 
 
 def _measure(title, categories, unit="Participants", param="COUNT_OF_PARTICIPANTS", cls_title=None):
@@ -24,7 +24,8 @@ GROUPS_WITH_TOTAL = [{"id": "BG000", "title": "SLS-005"}, {"id": "BG001", "title
 DENOMS = [{"units": "Participants", "counts": [{"groupId": "BG000", "value": "120"}, {"groupId": "BG001", "value": "41"},
                                                {"groupId": "BG002", "value": "161"}]}]
 
-# NCT05136885, trimmed: NIH/OMB race and ethnicity tables with a Total column.
+# NCT05136885, trimmed: NIH/OMB race and ethnicity tables with a Total column; the drug has no name match
+# with its MeSH term (SLS-005 is trehalose), so the term is paired by elimination.
 NIH_OMB_STUDY = {
     "protocolSection": {
         "identificationModule": {"nctId": "NCT05136885", "briefTitle": "SLS-005 in ALS"},
@@ -91,16 +92,16 @@ CUSTOMIZED_STUDY = {
 
 
 def test_nih_omb_study_fields():
-    rec = ps.parse_study(NIH_OMB_STUDY, FETCHED)
+    rec = ps.parse_study(NIH_OMB_STUDY)
     assert rec.nct_id == "NCT05136885"
-    assert rec.sex == "Male and Female" and (rec.female_count, rec.male_count) == (79, 82)
+    assert rec.sex == "MF" and (rec.female_count, rec.male_count) == (79, 82)
     assert rec.participants == 161
-    assert (rec.age_min, rec.age_max) == (18, 80)
-    assert rec.phase == "PHASE2/PHASE3"
+    assert (rec.age_lower, rec.age_upper) == (18, 80)
     assert rec.drug == "SLS-005"                                   # the matching placebo is not a drug
-    assert rec.drug_mesh == "Trehalose"
+    assert rec.drug_mesh == "Trehalose"                            # the one leftover MeSH term is this drug's
+    assert rec.drugs == [ps.DrugRow(drug="sls-005", drug_mesh="Trehalose")]
     assert rec.condition == "Amyotrophic Lateral Sclerosis"
-    assert rec.has_results == 1 and rec.race_reported == 1
+    assert rec.race_reported == 1
     race = {r.demographic: r for r in rec.races if r.dimension == "race"}
     assert race["Black or African American"].count == 3
     assert race["Black or African American"].category == "black"
@@ -112,21 +113,14 @@ def test_nih_omb_study_fields():
     ethnicity = {r.demographic: r for r in rec.races if r.dimension == "ethnicity"}
     assert ethnicity["Hispanic or Latino"].count == 3 and ethnicity["Hispanic or Latino"].category == "hispanic"
     assert ethnicity["Not Hispanic or Latino"].category == "not_hispanic"
-    drugs = {d.drug: d for d in rec.drugs}
-    assert drugs["sls-005"].role == "experimental" and drugs["sls-005"].intervention_type == "DRUG"
-    assert drugs["trehalose"].role is None and drugs["trehalose"].intervention_type == "MESH"
-    assert ("amyotrophic lateral sclerosis", "listed") in rec.conditions
-    assert ("motor neuron disease", "mesh") in rec.conditions
-    assert rec.source_url == "https://clinicaltrials.gov/study/NCT05136885"
-    assert rec.fetched_at == FETCHED
 
 
-def test_customized_race_table_and_age_cap():
-    rec = ps.parse_study(CUSTOMIZED_STUDY, FETCHED)
-    assert (rec.age_min, rec.age_max) == (40, 100)                  # "130 Years" is capped at 100
-    assert rec.age_max_raw == "130 Years"
+def test_customized_race_table_and_open_age():
+    rec = ps.parse_study(CUSTOMIZED_STUDY)
+    assert (rec.age_lower, rec.age_upper) == (40, 130)              # stored as written; nothing is capped
     assert rec.participants == 17160                                # baseline Total beats the enrollment count
     assert rec.drug == "Dapagliflozin 10 mg" and rec.drug_mesh == "Dapagliflozin"
+    assert rec.drugs == [ps.DrugRow(drug="dapagliflozin 10 mg", drug_mesh="Dapagliflozin")]
     assert rec.condition == "Diabetes Mellitus, Non-Insulin-Dependent; High Risk for Cardiovascular Event"
     race = {r.demographic: r for r in rec.races if r.dimension == "race"}
     assert race["Native Hawaiian or other Pacific Islander"].category == "nhpi"
@@ -194,23 +188,24 @@ def test_parse_age_years(raw, expected):
     assert ps.parse_age_years(raw) == expected
 
 
-def test_age_range_defaults_and_cap():
-    assert ps.age_range(None, None) == (0, 100)
-    assert ps.age_range("18 Years", None) == (18, 100)
+def test_age_range_is_null_when_the_protocol_sets_no_bound():
+    assert ps.age_range(None, None) == (None, None)
+    assert ps.age_range("18 Years", None) == (18, None)
+    assert ps.age_range(None, "17 Years") == (None, 17)
     assert ps.age_range("6 Months", "17 Years") == (0, 17)
-    assert ps.age_range("65 Years", "130 Years") == (65, 100)
-    assert ps.age_range("18 Years", "12 Years") == (18, 18)        # inverted bounds never give max < min
+    assert ps.age_range("65 Years", "130 Years") == (65, 130)
+    assert ps.age_range("18 Years", "12 Years") == (18, 18)        # inverted bounds never violate the CHECK
 
 
 def test_derive_sex():
-    assert ps.derive_sex("ALL", 79, 82) == "Male and Female"
-    assert ps.derive_sex("ALL", 40, 0) == "Female"                  # who enrolled beats who was eligible
-    assert ps.derive_sex("FEMALE", None, None) == "Female"
-    assert ps.derive_sex("MALE", None, None) == "Male"
-    assert ps.derive_sex(None, None, None) == "Male and Female"
+    assert ps.derive_sex("ALL", 79, 82) == "MF"
+    assert ps.derive_sex("ALL", 40, 0) == "F"                       # who enrolled beats who was eligible
+    assert ps.derive_sex("FEMALE", None, None) == "F"
+    assert ps.derive_sex("MALE", None, None) == "M"
+    assert ps.derive_sex(None, None, None) == "MF"
 
 
-def test_parse_drugs_roles_and_exclusions():
+def test_parse_drugs_keeps_experimental_arms_only():
     arms = {"armGroups": [{"label": "Lemborexant", "type": "EXPERIMENTAL"}, {"label": "Zolpidem", "type": "ACTIVE_COMPARATOR"},
                           {"label": "Placebo", "type": "PLACEBO_COMPARATOR"}],
             "interventions": [{"type": "DRUG", "name": "Lemborexant 5 mg", "armGroupLabels": ["Lemborexant"]},
@@ -219,31 +214,102 @@ def test_parse_drugs_roles_and_exclusions():
                               {"type": "DEVICE", "name": "Actigraph", "armGroupLabels": ["Lemborexant"]}]}
     drug, mesh, rows = ps.parse_drugs(arms, {"meshes": [{"term": "Zolpidem"}, {"term": "Lemborexant"}]})
     assert drug == "Lemborexant 5 mg"                               # the comparator is not what the study tested
-    assert mesh == "Zolpidem; Lemborexant"
-    roles = {r.drug: (r.role, r.intervention_type) for r in rows}
-    assert roles["lemborexant 5 mg"] == ("experimental", "DRUG")
-    assert roles["zolpidem er 6.25 mg"] == ("comparator", "DRUG")
-    assert roles["zolpidem"] == (None, "MESH")
-    assert "zolpidem-matched placebo" not in roles and "actigraph" not in roles
+    assert mesh == "Lemborexant"                                    # so the comparator's MeSH term is not its name
+    assert rows == [ps.DrugRow(drug="lemborexant 5 mg", drug_mesh="Lemborexant")]
+
+
+def test_all_comparator_arms_fall_back_to_those_drugs():
+    arms = {"armGroups": [{"label": "A", "type": "ACTIVE_COMPARATOR"}, {"label": "B", "type": "ACTIVE_COMPARATOR"}],
+            "interventions": [{"type": "DRUG", "name": "Warfarin", "armGroupLabels": ["A"]},
+                              {"type": "DRUG", "name": "Apixaban", "armGroupLabels": ["B"]}]}
+    drug, mesh, rows = ps.parse_drugs(arms, {"meshes": [{"term": "Apixaban"}, {"term": "Warfarin"}]})
+    assert drug == "Warfarin; Apixaban" and mesh == "Warfarin; Apixaban"
+    assert [r.drug_mesh for r in rows] == ["Warfarin", "Apixaban"]
+
+
+def test_mesh_pairing_rules():
+    def pair(names, terms, arm_type="EXPERIMENTAL"):
+        arms = {"armGroups": [{"label": "arm", "type": arm_type}],
+                "interventions": [{"type": "DRUG", "name": n, "armGroupLabels": ["arm"]} for n in names]}
+        return ps.parse_drugs(arms, {"meshes": [{"term": t} for t in terms]})
+
+    # dose arms of one drug share its term and collapse into one row
+    drug, mesh, rows = pair(["Dapagliflozin 5 mg", "Dapagliflozin 10 mg"], ["Dapagliflozin"])
+    assert drug == "Dapagliflozin 5 mg; Dapagliflozin 10 mg" and mesh == "Dapagliflozin"
+    assert rows == [ps.DrugRow(drug="dapagliflozin 5 mg; dapagliflozin 10 mg", drug_mesh="Dapagliflozin")]
+    # the most specific term wins, and either string may contain the other
+    assert pair(["Insulin glargine 100 U/mL"], ["Insulin", "Insulin Glargine"])[1] == "Insulin Glargine"
+    assert pair(["Iron"], ["Iron Compounds"])[1] == "Iron Compounds"
+    assert pair(["Environmental control"], ["Iron", "Copper"])[1] == "Environmental control"   # whole words only
+    # a code name is paired with the one term nothing else claimed; the comparator claims its own term
+    arms = {"armGroups": [{"label": "Sel", "type": "EXPERIMENTAL"}, {"label": "Dac", "type": "ACTIVE_COMPARATOR"}],
+            "interventions": [{"type": "DRUG", "name": "75mg selumetinib", "armGroupLabels": ["Sel"]},
+                              {"type": "DRUG", "name": "Dacarbazine", "armGroupLabels": ["Dac"]}]}
+    assert ps.parse_drugs(arms, {"meshes": [{"term": "AZD 6244"}, {"term": "Dacarbazine"}]})[1] == "AZD 6244"
+    # two unpaired drugs and one leftover term: no guessing, the names stand in for MeSH
+    assert pair(["Zandelisib", "CHOP"], ["ME-401"])[1] == "Zandelisib; CHOP"
+    # no MeSH at all: the dose-stripped name is the normalized name
+    assert pair(["TAK-438 10 mg"], []) == ("TAK-438 10 mg", "TAK-438", [ps.DrugRow(drug="tak-438 10 mg", drug_mesh="TAK-438")])
+
+
+@pytest.mark.parametrize("name, expected", [
+    ("TAK-438 10 mg", "TAK-438"), ("75mg selumetinib", "selumetinib"), ("Insulin glargine 100 U/mL", "Insulin glargine"),
+    ("Gadobutrol 1 MMOLE/ML Intravenous Solution", "Gadobutrol Intravenous Solution"), ("5% dextrose", "dextrose"),
+    ("Vitamin D3 1000 IU", "Vitamin D3"), ("Dapagliflozin", "Dapagliflozin"), ("10 mg", "10 mg"),
+])
+def test_strip_dose(name, expected):
+    assert ps.strip_dose(name) == expected
 
 
 def test_single_arm_without_labels_is_experimental():
     drug, mesh, rows = ps.parse_drugs({"interventions": [{"type": "BIOLOGICAL", "name": "Vaccine X"}]}, None)
-    assert drug == "Vaccine X" and mesh is None and rows[0].role == "experimental"
+    assert drug == "Vaccine X" and mesh == "Vaccine X" and rows == [ps.DrugRow(drug="vaccine x", drug_mesh="Vaccine X")]
 
 
-def test_study_without_results():
+def test_study_without_results_uses_protocol_values():
     study = {"protocolSection": {"identificationModule": {"nctId": "nct00000001"},
+                                 "statusModule": {"overallStatus": "COMPLETED"},
+                                 "designModule": {"phases": ["PHASE3"], "enrollmentInfo": {"count": 50}},
                                  "eligibilityModule": {"sex": "FEMALE", "minimumAge": "12 Years"},
-                                 "conditionsModule": {"conditions": ["Breast Cancer"]}}}
-    rec = ps.parse_study(study, FETCHED)
+                                 "conditionsModule": {"conditions": ["Breast Cancer"]},
+                                 "armsInterventionsModule": {"interventions": [{"type": "DRUG", "name": "Tamoxifen"}]}}}
+    rec = ps.parse_study(study)
     assert rec.nct_id == "NCT00000001"
-    assert rec.has_results == 0 and rec.race_reported == 0 and rec.races == []
-    assert rec.sex == "Female" and (rec.age_min, rec.age_max) == (12, 100)
-    assert rec.participants is None and rec.drug is None and rec.condition == "Breast Cancer"
-    assert rec.conditions == [("breast cancer", "listed")]
+    assert rec.race_reported == 0 and rec.races == []
+    assert rec.sex == "F" and (rec.age_lower, rec.age_upper) == (12, None)
+    assert rec.participants == 50 and (rec.female_count, rec.male_count) == (None, None)
+    assert rec.drug == "Tamoxifen" and rec.condition == "Breast Cancer"
 
 
-def test_study_without_nct_id_is_rejected():
-    with pytest.raises(ValueError):
-        ps.parse_study({"protocolSection": {}}, FETCHED)
+def _variant(**changes):
+    study = copy.deepcopy(CUSTOMIZED_STUDY)
+    protocol = study["protocolSection"]
+    for key, value in changes.items():
+        module, _, field = key.partition("__")
+        protocol.setdefault(module, {})[field] = value
+    return study
+
+
+@pytest.mark.parametrize("changes, reason", [
+    ({"statusModule__overallStatus": "TERMINATED"}, "status"),
+    ({"statusModule__overallStatus": None}, "status"),
+    ({"designModule__phases": ["PHASE2"]}, "phase"),
+    ({"designModule__phases": []}, "phase"),
+    ({"armsInterventionsModule__interventions": [{"type": "DEVICE", "name": "Stent"}]}, "no drug"),
+    ({"armsInterventionsModule__interventions": [{"type": "DRUG", "name": "Placebo"}]}, "no drug"),
+    ({"conditionsModule__conditions": []}, "no condition"),
+    ({"identificationModule__nctId": ""}, "no nct id"),
+])
+def test_out_of_scope_studies_are_skipped(changes, reason):
+    with pytest.raises(ps.SkipStudy) as exc:
+        ps.parse_study(_variant(**changes))
+    assert exc.value.reason == reason and isinstance(exc.value, ValueError)
+
+
+def test_phase2_phase3_is_in_scope_and_missing_participants_is_not():
+    assert ps.parse_study(_variant(designModule__phases=["PHASE2", "PHASE3"])).nct_id == "NCT01730534"
+    study = _variant(designModule__enrollmentInfo={})
+    del study["resultsSection"]
+    with pytest.raises(ps.SkipStudy) as exc:
+        ps.parse_study(study)
+    assert exc.value.reason == "no participant count"

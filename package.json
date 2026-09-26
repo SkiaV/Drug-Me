@@ -4,8 +4,9 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "backend": "python src/backend/api.py",
-    "backend:ingest": "python src/backend/ingest.py",
+    "backend": "python backend/api.py",
+    "backend:ingest": "python backend/ingest.py",
+    "backend:test": "python -m pytest -q backend",
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",

@@ -37,10 +37,6 @@ const defaultFilters: SearchFilters = {
   ...defaultProfile,
   drug: "",
   indication: "",
-  status: "All statuses",
-  phase: "All phases",
-  fromDate: "",
-  toDate: "",
 };
 
 function Icon({
@@ -241,7 +237,7 @@ function AppShell({
             aria-current={route === "report" ? "page" : undefined}
             onClick={() =>
               navigate(
-                "/report/fluoxetine?age=67&sex=Female&race=Black%20or%20African%20American",
+                "/report/metformin?age=67&sex=Female&race=Black%20or%20African%20American",
               )
             }
             type="button"
@@ -454,8 +450,8 @@ function Dashboard({ navigate }: { navigate: (path: string) => void }) {
         <article>
           <small>Evidence refreshed</small>
           <strong>
-            {stats?.ingest?.finished_at
-              ? new Date(stats.ingest.finished_at).toLocaleDateString()
+            {stats?.ingest?.loaded_at
+              ? new Date(stats.ingest.loaded_at).toLocaleDateString()
               : "Not reported"}
           </strong>
           <span>{dataSource === "backend" ? "Flask backend" : "Sample fallback"}</span>
@@ -508,7 +504,13 @@ function Dashboard({ navigate }: { navigate: (path: string) => void }) {
             Scores describe the completeness of demographic evidence—not drug
             safety, efficacy, or treatment suitability.
           </p>
-          <span>{visibleDrugs.length} sample records shown</span>
+          <span>
+            {visibleDrugs.length}{" "}
+            {dataSource === "backend"
+              ? "medicines from the 200 most recent studies"
+              : "sample records"}{" "}
+            shown
+          </span>
         </div>
       </section>
     </main>
@@ -601,7 +603,7 @@ function AdvancedSearch({ navigate }: { navigate: (path: string) => void }) {
   return (
     <main className="page">
       <PageIntro
-        description="Focus the representation score on a demographic profile, then narrow the uploaded evidence by medicine, use, study status, phase, or start date."
+        description="Focus the representation score on a demographic profile, then narrow the evidence by medicine or use. Every study is a completed Phase 3 trial with posted results."
         eyebrow="Advanced evidence search"
         title="Ask a more specific question."
       />
@@ -626,7 +628,10 @@ function AdvancedSearch({ navigate }: { navigate: (path: string) => void }) {
             <span>02</span>
             <div>
               <h2>Clinical filters</h2>
-              <p>Optional. Leave fields open to search the full sample evidence set.</p>
+              <p>
+                Optional. Leave fields open to search every completed Phase 3
+                trial with posted results.
+              </p>
             </div>
           </div>
           <div className="clinical-fields">
@@ -634,7 +639,7 @@ function AdvancedSearch({ navigate }: { navigate: (path: string) => void }) {
               <span>Generic drug name</span>
               <input
                 onChange={(event) => update("drug", event.target.value)}
-                placeholder="e.g. fluoxetine"
+                placeholder="e.g. metformin"
                 value={filters.drug}
               />
             </label>
@@ -642,51 +647,8 @@ function AdvancedSearch({ navigate }: { navigate: (path: string) => void }) {
               <span>Indication or use</span>
               <input
                 onChange={(event) => update("indication", event.target.value)}
-                placeholder="e.g. depression"
+                placeholder="e.g. diabetes"
                 value={filters.indication}
-              />
-            </label>
-            <label className="field">
-              <span>Study status</span>
-              <select
-                onChange={(event) => update("status", event.target.value)}
-                value={filters.status}
-              >
-                <option>All statuses</option>
-                <option>Recruiting</option>
-                <option>Active, not recruiting</option>
-                <option>Completed</option>
-                <option>Terminated</option>
-              </select>
-            </label>
-            <label className="field">
-              <span>Study phase</span>
-              <select
-                onChange={(event) => update("phase", event.target.value)}
-                value={filters.phase}
-              >
-                <option>All phases</option>
-                <option>Phase 1</option>
-                <option>Phase 2</option>
-                <option>Phase 3</option>
-                <option>Phase 4</option>
-                <option>Observational</option>
-              </select>
-            </label>
-            <label className="field">
-              <span>Study start from</span>
-              <input
-                onChange={(event) => update("fromDate", event.target.value)}
-                type="date"
-                value={filters.fromDate}
-              />
-            </label>
-            <label className="field">
-              <span>Study start to</span>
-              <input
-                onChange={(event) => update("toDate", event.target.value)}
-                type="date"
-                value={filters.toDate}
               />
             </label>
           </div>
@@ -736,7 +698,7 @@ function AdvancedSearch({ navigate }: { navigate: (path: string) => void }) {
 }
 
 function readReportState() {
-  const drugId = window.location.pathname.split("/")[2] || "fluoxetine";
+  const drugId = window.location.pathname.split("/")[2] || "metformin";
   const params = new URLSearchParams(window.location.search);
   return {
     drugId,
@@ -882,19 +844,19 @@ function IndividualReport({ navigate }: { navigate: (path: string) => void }) {
                   </div>
                   <dl>
                     <div>
-                      <dt>Study type</dt>
-                      <dd>{item.phase}</dd>
+                      <dt>Participants</dt>
+                      <dd>{item.participants.toLocaleString()}</dd>
                     </div>
                     <div>
-                      <dt>Status</dt>
-                      <dd>{item.status}</dd>
+                      <dt>Sex enrolled</dt>
+                      <dd>{item.sex}</dd>
                     </div>
                     <div>
-                      <dt>Enrollment</dt>
-                      <dd>{item.enrollment.toLocaleString()}</dd>
+                      <dt>Age eligibility</dt>
+                      <dd>{item.ageRange}</dd>
                     </div>
                     <div>
-                      <dt>Profile match</dt>
+                      <dt>Race reporting</dt>
                       <dd>{item.match}</dd>
                     </div>
                   </dl>

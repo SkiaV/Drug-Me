@@ -34,24 +34,27 @@ export type DemographicProfile = {
     | "All or not specified";
 };
 
+/**
+ * Every study in the backend is a completed Phase 3 trial (backend/schema.sql enforces that scope at
+ * load time), so the only clinical filters left are the medicine and its use.
+ */
 export type SearchFilters = DemographicProfile & {
   drug: string;
   indication: string;
-  status: string;
-  phase: string;
-  fromDate: string;
-  toDate: string;
 };
 
+/** `GET /api/studies/stats`, with the ingest record that `backend/ingest.py` writes into `meta`. */
 export type BackendStats = {
   studies: number;
-  withResults: number;
+  participants: number;
   withRaceComposition: number;
   distinctDrugs: number;
-  distinctConditions: number;
   ingest: {
-    finished_at?: string;
-    filters?: string;
+    studies?: number;
+    skipped?: Record<string, number>;
+    loaded_at?: string;
+    agg_filters?: string;
+    scope?: { status?: string; phase?: string };
   } | null;
 };
 
@@ -61,12 +64,14 @@ export type DashboardData = {
   source: "backend" | "sample";
 };
 
+/** One supporting trial on the report page, derived from a `studies` row. */
 export type EvidenceItem = {
   id: string;
   title: string;
-  phase: string;
-  status: string;
-  enrollment: number;
+  drug: string;
+  participants: number;
+  sex: string;
+  ageRange: string;
   match: string;
   sourceUrl: string;
 };

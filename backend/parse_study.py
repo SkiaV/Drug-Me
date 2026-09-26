@@ -1,25 +1,30 @@
-"""Turn one raw ClinicalTrials.gov API v2 study into the six fields of schema.sql.
+"""Turn one raw ClinicalTrials.gov API v2 study into one `studies` row of schema.sql, plus its race and drug rows.
 
 Pure functions, no I/O, so every rule can be unit-tested against real study JSON (tests/test_parse_study.py).
 
-Field by field:
-  1. race composition  resultsSection.baselineCharacteristicsModule.measures[] whose title starts with "race"
-                       or "ethnic": one (demographic label, head count) per category. The count is the "Total"
-                       column; when the sponsor posted no Total column the arms are summed.
-  2. age range         protocolSection.eligibilityModule.minimumAge / maximumAge ("18 Years", "6 Months", absent).
-                       Missing lower bound -> 0, missing upper bound -> AGE_CAP, everything capped at AGE_CAP.
-  3. sex               who actually enrolled (baseline "Sex: Female, Male" counts); protocol eligibility as fallback.
-  4. drug              interventions of type DRUG / BIOLOGICAL / COMBINATION_PRODUCT in EXPERIMENTAL arms,
-                       placebo-like names dropped; MeSH-normalized names kept alongside for clean matching.
-  5. condition         protocolSection.conditionsModule.conditions (+ MeSH terms for matching).
-  6. study             NCT number, title, status, phase, start date, source URL.
+Scope, per schema.sql ("phase III, completed studies only, enforced at load time"): parse_study raises SkipStudy
+for a study that is not COMPLETED, does not list PHASE3, or cannot fill a NOT NULL column (no non-placebo drug,
+no condition, no participant count). ingest.py counts the reasons and carries on.
+
+Column by column:
+  drug, drug_mesh   interventions of type DRUG / BIOLOGICAL / COMBINATION_PRODUCT in EXPERIMENTAL arms, placebo-like
+                    names dropped, each paired with its MeSH term from derivedSection.interventionBrowseModule.
+                    A drug ClinicalTrials.gov gave no MeSH term keeps its own name, minus the dose, as drug_mesh.
+  condition         protocolSection.conditionsModule.conditions, "; "-joined.
+  sex               M / F / MF: who enrolled (baseline "Sex: Female, Male" counts), else who the protocol allowed.
+  age_lower/upper   protocolSection.eligibilityModule.minimumAge / maximumAge in whole years; NULL when the
+                    protocol sets no bound. Nothing is capped: "130 Years" is stored as 130.
+  participants      baseline "Total" head count, else the protocol's enrollment count.
+  study_races       resultsSection.baselineCharacteristicsModule.measures[] whose title starts with "race" or
+                    "ethnic": one (demographic label, head count) per category, from the "Total" column, or the
+                    arms summed when the sponsor posted no Total column.
 """
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
 
-from config import AGE_CAP
+from config import SCOPE_PHASE, SCOPE_STATUS
 
 # ----------------------------------------------------------------------------- record shapes
 
@@ -35,40 +40,48 @@ class RaceRow:
 
 @dataclass
 class DrugRow:
-    drug: str                       # lower-cased name for matching
-    role: str | None                # experimental / comparator / placebo / other; None for MeSH terms
-    intervention_type: str          # DRUG / BIOLOGICAL / COMBINATION_PRODUCT / MESH
+    drug: str               # the reported name(s) behind this MeSH term, lower-cased, "; "-joined
+    drug_mesh: str          # MeSH term, or the dose-stripped reported name when ClinicalTrials.gov derived none
 
 
 @dataclass
 class StudyRecord:
+    """One `studies` row; the field names are the column names in schema.sql."""
     nct_id: str
-    title: str | None
-    drug: str | None
-    drug_mesh: str | None
-    condition: str | None
-    sex: str
-    age_min: int
-    age_max: int
-    eligible_sex: str | None
-    age_min_raw: str | None
-    age_max_raw: str | None
+    drug: str
+    drug_mesh: str
+    condition: str
+    sex: str                            # M / F / MF
+    age_lower: int | None
+    age_upper: int | None
     female_count: int | None
     male_count: int | None
-    participants: int | None
-    phase: str | None
-    status: str | None
-    start_date: str | None
-    has_results: int
+    participants: int
     race_reported: int
-    source_url: str
-    fetched_at: str
     races: list[RaceRow] = field(default_factory=list)
     drugs: list[DrugRow] = field(default_factory=list)
-    conditions: list[tuple[str, str]] = field(default_factory=list)     # (lower-cased name, "listed" | "mesh")
 
 
-# ----------------------------------------------------------------------------- 1. race composition
+class SkipStudy(ValueError):
+    """The study is out of scope or cannot fill a NOT NULL column. `reason` is a short bucket for the ingest log."""
+
+    def __init__(self, reason: str, detail: str = ""):
+        super().__init__(f"{reason}: {detail}" if detail else reason)
+        self.reason = reason
+
+
+# ----------------------------------------------------------------------------- scope
+
+
+def check_scope(status: str | None, phases: list[str] | None) -> None:
+    """Raise SkipStudy unless the study is completed and lists Phase 3 (PHASE2/PHASE3 counts)."""
+    if (status or "").upper() != SCOPE_STATUS:
+        raise SkipStudy("status", status or "missing")
+    if SCOPE_PHASE not in {(p or "").upper() for p in phases or []}:
+        raise SkipStudy("phase", "/".join(phases or []) or "missing")
+
+
+# ----------------------------------------------------------------------------- race composition
 
 RACE_CATEGORIES = ("white", "black", "asian", "aian", "nhpi", "multiracial", "hispanic", "not_hispanic", "other", "unknown")
 
@@ -175,7 +188,7 @@ def parse_race(baseline: dict | None) -> list[RaceRow]:
     return rows
 
 
-# ----------------------------------------------------------------------------- 3. sex, participants
+# ----------------------------------------------------------------------------- sex, participants
 
 
 def parse_sex_counts(baseline: dict | None) -> tuple[int | None, int | None]:
@@ -203,12 +216,12 @@ def parse_sex_counts(baseline: dict | None) -> tuple[int | None, int | None]:
 
 
 def derive_sex(eligible_sex: str | None, female: int | None, male: int | None) -> str:
-    """"Male", "Female" or "Male and Female": who was actually enrolled, else who the protocol allowed."""
+    """"M", "F" or "MF": who was actually enrolled, else who the protocol allowed."""
     if (female or 0) > 0 or (male or 0) > 0:
         if female and male:
-            return "Male and Female"
-        return "Female" if female else "Male"
-    return {"FEMALE": "Female", "MALE": "Male"}.get((eligible_sex or "").upper(), "Male and Female")
+            return "MF"
+        return "F" if female else "M"
+    return {"FEMALE": "F", "MALE": "M"}.get((eligible_sex or "").upper(), "MF")
 
 
 def parse_participants(baseline: dict | None, enrollment: int | None) -> int | None:
@@ -223,7 +236,7 @@ def parse_participants(baseline: dict | None, enrollment: int | None) -> int | N
     return enrollment
 
 
-# ----------------------------------------------------------------------------- 2. age range
+# ----------------------------------------------------------------------------- age range
 
 _AGE_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(year|month|week|day|hour|minute)", re.I)
 _UNITS_PER_YEAR = {"year": 1.0, "month": 12.0, "week": 52.0, "day": 365.0, "hour": 8760.0, "minute": 525600.0}
@@ -237,86 +250,122 @@ def parse_age_years(raw: str | None) -> int | None:
     return int(float(m.group(1)) / _UNITS_PER_YEAR[m.group(2).lower()])
 
 
-def age_range(min_raw: str | None, max_raw: str | None, cap: int = AGE_CAP) -> tuple[int, int]:
-    """(lower, upper) in whole years. No lower bound -> 0; no upper bound -> cap; both capped at cap."""
+def age_range(min_raw: str | None, max_raw: str | None) -> tuple[int | None, int | None]:
+    """(lower, upper) in whole years, None where the protocol sets no bound. An upper bound below the lower
+    bound (a data-entry slip) is raised to the lower bound so the schema's CHECK holds."""
     lo = parse_age_years(min_raw)
     hi = parse_age_years(max_raw)
-    lo = 0 if lo is None else max(0, min(lo, cap))
-    hi = cap if hi is None else max(0, min(hi, cap))
-    return lo, max(lo, hi)
+    if lo is not None and hi is not None and hi < lo:
+        hi = lo
+    return lo, hi
 
 
-# ----------------------------------------------------------------------------- 4. drug
+# ----------------------------------------------------------------------------- drug
 
 DRUG_TYPES = {"DRUG", "BIOLOGICAL", "COMBINATION_PRODUCT"}
 PLACEBO_LIKE = re.compile(r"placebo|dummy|sham|vehicle|matching|matched", re.I)
 _ARM_ROLE = {"EXPERIMENTAL": "experimental", "ACTIVE_COMPARATOR": "comparator",
              "PLACEBO_COMPARATOR": "placebo", "SHAM_COMPARATOR": "placebo"}
 _ROLE_RANK = ("experimental", "comparator", "placebo", "other")
+# "10 mg", "75mg", "5%", "100 U/mL", "1 MMOLE/ML", "2 mg/kg": a number, a unit, an optional "per" unit
+_DOSE = re.compile(r"(?<![a-z0-9])\d+(?:[.,]\d+)?\s*(?:mg|mcg|µg|ug|g|kg|ml|l|%|iu|u|units?|mmole?)"
+                   r"(?:\s*/\s*(?:ml|kg|l|day|dose|d|h|hr|m2))?(?![a-z0-9])", re.I)
 
 
 def _clean(text) -> str:
     return re.sub(r"\s+", " ", text or "").strip()
 
 
-def parse_drugs(arms_module: dict | None, mesh_module: dict | None) -> tuple[str | None, str | None, list[DrugRow]]:
-    """-> (drug string for the experimental arms, MeSH-normalized drug string, one DrugRow per distinct name)."""
+def strip_dose(name: str) -> str:
+    """'TAK-438 10 mg' -> 'TAK-438', '75mg selumetinib' -> 'selumetinib'. Unchanged when nothing would be left."""
+    stripped = _clean(_DOSE.sub(" ", name)).strip(" ,;:-/()")
+    return stripped or name
+
+
+def _contains(haystack: str, needle: str) -> bool:
+    """Whole-word containment, so "iron" is not found inside "environmental"."""
+    return len(needle) >= 3 and re.search(rf"(?<![a-z0-9]){re.escape(needle)}(?![a-z0-9])", haystack) is not None
+
+
+def _matches(name: str, term: str) -> bool:
+    """A MeSH term names an intervention when either string contains the other, dose aside."""
+    a, b = strip_dose(name).lower(), term.lower()
+    return _contains(a, b) or _contains(b, a)
+
+
+def pair_mesh(names: list[str], mesh_terms: list[str], wanted: list[str]) -> dict[str, str]:
+    """Reported drug name -> MeSH term, for every name in `wanted`.
+
+    ClinicalTrials.gov lists a study's MeSH intervention terms as one flat list, not per intervention, so the
+    pairing is by name: a term that appears in a drug name (or vice versa) is that drug's term, the most specific
+    one when several fit ("Insulin Glargine" over "Insulin"). When exactly one non-placebo drug and exactly one
+    term are left over they belong together: that is how "BAY94-9027" gets "Factor VIII". Anything still
+    unpaired keeps its own name, minus the dose.
+    """
+    paired: dict[str, str] = {}
+    used: set[str] = set()
+    for name in names:
+        hits = [term for term in mesh_terms if _matches(name, term)]
+        if hits:
+            paired[name] = max(hits, key=len)
+            used.update(hits)
+    left_names = [n for n in names if n not in paired]
+    left_terms = [t for t in mesh_terms if t not in used]
+    if len(left_names) == 1 and len(left_terms) == 1 and left_names[0] in wanted:
+        paired[left_names[0]] = left_terms[0]
+    return {name: paired.get(name) or strip_dose(name) for name in wanted}
+
+
+def parse_drugs(arms_module: dict | None, mesh_module: dict | None) -> tuple[str, str, list[DrugRow]]:
+    """-> (drug string for the experimental arms, the same drugs as MeSH names, one DrugRow per MeSH name).
+    Raises SkipStudy when the study has no non-placebo drug."""
     arms_module = arms_module or {}
     arm_role = {_clean(arm.get("label")).lower(): _ARM_ROLE.get(arm.get("type") or "", "other")
                 for arm in arms_module.get("armGroups") or []}
+    names: list[str] = []                       # every non-placebo drug, in protocol order
     experimental: list[str] = []
-    others: list[str] = []
-    rows: list[DrugRow] = []
     seen: set[str] = set()
     for item in arms_module.get("interventions") or []:
         name = _clean(item.get("name"))
         itype = (item.get("type") or "").upper()
-        if not name or itype not in DRUG_TYPES or PLACEBO_LIKE.search(name):
+        if not name or itype not in DRUG_TYPES or PLACEBO_LIKE.search(name) or name.lower() in seen:
             continue
+        seen.add(name.lower())
         roles = {arm_role.get(_clean(label).lower(), "other") for label in item.get("armGroupLabels") or []}
         # a single-arm study often lists no arm labels at all: that drug is the one being tested
         role = next((r for r in _ROLE_RANK if r in roles), "experimental") if roles else "experimental"
-        (experimental if role == "experimental" else others).append(name)
-        if name.lower() not in seen:
-            seen.add(name.lower())
-            rows.append(DrugRow(drug=name.lower(), role=role, intervention_type=itype))
-    mesh_terms: list[str] = []
-    for mesh in (mesh_module or {}).get("meshes") or []:
-        term = _clean(mesh.get("term"))
-        if term and term not in mesh_terms:
-            mesh_terms.append(term)
-            if term.lower() not in seen:
-                seen.add(term.lower())
-                rows.append(DrugRow(drug=term.lower(), role=None, intervention_type="MESH"))
-    names = experimental or others
-    return "; ".join(dict.fromkeys(names)) or None, "; ".join(mesh_terms) or None, rows
+        names.append(name)
+        if role == "experimental":
+            experimental.append(name)
+    chosen = experimental or names              # a study whose drug arms are all comparators still tested those drugs
+    if not chosen:
+        raise SkipStudy("no drug")
+    mesh_terms = [t for t in dict.fromkeys(_clean(m.get("term")) for m in (mesh_module or {}).get("meshes") or []) if t]
+    pairing = pair_mesh(names, mesh_terms, chosen)
+    by_term: dict[str, list[str]] = {}
+    for name in chosen:
+        by_term.setdefault(pairing[name], []).append(name.lower())
+    rows = [DrugRow(drug="; ".join(raw), drug_mesh=term) for term, raw in by_term.items()]
+    return "; ".join(chosen), "; ".join(by_term), rows
 
 
-# ----------------------------------------------------------------------------- 5. condition
+# ----------------------------------------------------------------------------- condition
 
 
-def parse_conditions(conditions_module: dict | None, mesh_module: dict | None) -> tuple[str | None, list[tuple[str, str]]]:
-    """-> (condition string as listed by the sponsor, [(lower-cased name, "listed" | "mesh")])."""
+def parse_condition(conditions_module: dict | None) -> str:
+    """The sponsor's condition list, "; "-joined. Raises SkipStudy when there is none."""
     listed = [c for c in dict.fromkeys(_clean(c) for c in (conditions_module or {}).get("conditions") or []) if c]
-    rows: list[tuple[str, str]] = []
-    seen: set[str] = set()
-    for name in listed:
-        if name.lower() not in seen:
-            seen.add(name.lower())
-            rows.append((name.lower(), "listed"))
-    for mesh in (mesh_module or {}).get("meshes") or []:
-        term = _clean(mesh.get("term"))
-        if term and term.lower() not in seen:
-            seen.add(term.lower())
-            rows.append((term.lower(), "mesh"))
-    return "; ".join(listed) or None, rows
+    if not listed:
+        raise SkipStudy("no condition")
+    return "; ".join(listed)
 
 
-# ----------------------------------------------------------------------------- 6. study
+# ----------------------------------------------------------------------------- one study
 
 
-def parse_study(study: dict, fetched_at: str) -> StudyRecord:
-    """One raw API v2 study -> StudyRecord. Raises ValueError when the study has no NCT number."""
+def parse_study(study: dict) -> StudyRecord:
+    """One raw API v2 study -> StudyRecord. Raises SkipStudy (a ValueError) for a study that does not belong
+    in the table: no NCT number, out of scope, or a NOT NULL column that cannot be filled."""
     protocol = study.get("protocolSection") or {}
     derived = study.get("derivedSection") or {}
     ident = protocol.get("identificationModule") or {}
@@ -328,40 +377,31 @@ def parse_study(study: dict, fetched_at: str) -> StudyRecord:
 
     nct_id = (ident.get("nctId") or "").strip().upper()
     if not nct_id:
-        raise ValueError("study has no nctId")
+        raise SkipStudy("no nct id")
+    check_scope(status.get("overallStatus"), design.get("phases"))
 
-    races = parse_race(baseline)
-    female, male = parse_sex_counts(baseline)
-    age_min, age_max = age_range(eligibility.get("minimumAge"), eligibility.get("maximumAge"))
     drug, drug_mesh, drug_rows = parse_drugs(protocol.get("armsInterventionsModule"),
                                              derived.get("interventionBrowseModule"))
-    condition, condition_rows = parse_conditions(protocol.get("conditionsModule"),
-                                                 derived.get("conditionBrowseModule"))
-    enrollment = _int((design.get("enrollmentInfo") or {}).get("count"))
+    condition = parse_condition(protocol.get("conditionsModule"))
+    participants = parse_participants(baseline, _int((design.get("enrollmentInfo") or {}).get("count")))
+    if participants is None:
+        raise SkipStudy("no participant count")
+    races = parse_race(baseline)
+    female, male = parse_sex_counts(baseline)
+    age_lower, age_upper = age_range(eligibility.get("minimumAge"), eligibility.get("maximumAge"))
 
     return StudyRecord(
         nct_id=nct_id,
-        title=ident.get("briefTitle"),
         drug=drug,
         drug_mesh=drug_mesh,
         condition=condition,
         sex=derive_sex(eligibility.get("sex"), female, male),
-        age_min=age_min,
-        age_max=age_max,
-        eligible_sex=eligibility.get("sex"),
-        age_min_raw=eligibility.get("minimumAge"),
-        age_max_raw=eligibility.get("maximumAge"),
+        age_lower=age_lower,
+        age_upper=age_upper,
         female_count=female,
         male_count=male,
-        participants=parse_participants(baseline, enrollment),
-        phase="/".join(design.get("phases") or []) or None,
-        status=status.get("overallStatus"),
-        start_date=(status.get("startDateStruct") or {}).get("date"),
-        has_results=int(bool(results)),
+        participants=participants,
         race_reported=int(any(r.dimension == "race" for r in races)),
-        source_url=f"https://clinicaltrials.gov/study/{nct_id}",
-        fetched_at=fetched_at,
         races=races,
         drugs=drug_rows,
-        conditions=condition_rows,
     )

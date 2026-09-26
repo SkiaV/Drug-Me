@@ -1,31 +1,39 @@
 each file answers exactly one question, so any teammate can read one file in a sitting and change it without understanding the rest. It mirrors the split your existing backend already uses (client, harmonizer, db, harvest script, app). It could be squashed into two files; it would be shorter and harder to test.
 
+Updated 2026-09-26 for the team's hand-edited schema.sql: three tables instead of four, sex stored as M / F / MF, age bounds called age_lower / age_upper and left NULL when the protocol sets none, and scope (completed Phase 3 only) enforced by the loader rather than the schema.
+
 What each piece does
 
 ┌─────────────────┬────────────────────────────────────────────────────────────────────────────────────────────────┐
 │      File       │                                            One job                                             │
 ├─────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────┤
-│ config.py       │ Paths, the ClinicalTrials.gov filter, page size, the age cap. Overridable by environment       │
-│                 │ variables.                                                                                     │
+│ config.py       │ Paths, the ClinicalTrials.gov filter, page size, the load-time scope. Overridable by           │
+│                 │ environment variables.                                                                         │
 ├─────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────┤
-│ schema.sql      │ The database, readable without Python. Four tables plus a small meta table.                    │
+│ schema.sql      │ The database, readable without Python. The team's copy, verbatim: studies, study_races,        │
+│                 │ study_drugs, plus a small meta table.                                                          │
 ├─────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────┤
 │ ctgov_client.py │ Talks to the API: paging, retries, backoff. Saves each raw page to disk.                       │
 ├─────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────┤
-│ parse_study.py  │ Turns one raw study JSON into the six fields. Pure functions, no network, no database.         │
+│ parse_study.py  │ Turns one raw study JSON into one studies row (or a SkipStudy with a reason). Pure functions,  │
+│                 │ no network, no database.                                                                       │
+├─────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ validation.py   │ Canonicalizes the query string (Female -> F, "Black or African American" -> black) and lists   │
+│                 │ every bad value. Standard library only; the same file works in the team app.                   │
 ├─────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────┤
 │ db.py           │ Creates the schema, upserts records, and holds the four queries the API needs.                 │
 ├─────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────┤
-│ ingest.py       │ The command you run: download pages, parse each study, load in batches.                        │
+│ ingest.py       │ The command you run: download pages, parse each study, skip what is out of scope, load in      │
+│                 │ batches, record what happened in meta.                                                         │
 ├─────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────┤
 │ api.py          │ Flask blueprint with four GET routes, plus a standalone app for local testing.                 │
 ├─────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────┤
-│ tests/          │ 57 tests built from real API responses, trimmed. Run offline in under a second.                │
+│ tests/          │ 83 tests built from real API responses, trimmed. Run offline in under a second.                │
 └─────────────────┴────────────────────────────────────────────────────────────────────────────────────────────────┘
 
-The flow is a straight line. The ingest script asks the client for Phase 3 studies with posted results, a thousand per request, about fifteen requests in total, and keeps every page as JSON on disk. It then hands each study to the parser, which returns a small record: the six fields plus three child lists (race rows, drug rows, condition rows). The database layer writes those in transactions of a thousand, upserting by NCT number so re-running never duplicates. Flask then reads the file and serves JSON: a filtered list, one study, a pooled aggregate, and stats.
+The flow is a straight line. The ingest script asks the client for completed Phase 3 studies with posted results, a thousand per request, thirteen requests in total, and keeps every page as JSON on disk. It then hands each study to the parser, which either returns a small record (the studies columns plus two child lists: race rows and drug rows) or says why the study does not belong (not completed, not Phase 3, no non-placebo drug, no condition, no participant count). The database layer writes the records in transactions of a thousand, upserting by NCT number so re-running never duplicates. Flask then reads the file and serves JSON: a filtered list, one study, a pooled aggregate, and stats.
 
-Why the schema has four tables instead of one. Race composition is a list per study, so it must be its own table. Drug and condition are stored twice on purpose: as the "; "-joined strings your spec asked for on the study row, and split one per row in link tables so WHERE drug = 'zolpidem' is exact and indexed. The race table keeps the label verbatim for auditing and adds a harmonized bucket so counts can be added across studies.
+Why the schema has three tables instead of one. Race composition is a list per study, so it must be its own table. Drug is stored twice on purpose: as the "; "-joined strings the spec asked for on the study row, and split one row per MeSH name in study_drugs so WHERE drug LIKE '%metformin%' is indexed. The race table keeps the label verbatim for auditing and adds a harmonized bucket so counts can be added across studies. Condition lives only on the study row now; searches use LIKE against it.
 
 The hard part is the parser
 
@@ -33,24 +41,25 @@ Baseline tables on ClinicalTrials.gov are free-form, and the rules in parse_stud
 
 - Counts are strings, sometimes "NA" or "1,203". The parser takes the "Total" column when the sponsor posted one and sums the arms when they didn't. Percentage tables are skipped.
 - Race labels are whatever the sponsor typed. About 45% of race tables are the free-text "Customized" kind. An ordered regex table maps labels to ten buckets; order matters, which is why "White - Arabic/North African Heritage" lands in white, not black. Anything unrecognized goes to "other" rather than disappearing. Zero counts are kept because "reported 0" and "not reported" are different findings.
-- Age range is the protocol's eligibility, not the ages of who enrolled. Missing lower bound is 0, missing upper bound is 100, and "130 Years" becomes 100.
-- Sex reflects enrollment from the baseline sex table, with eligibility as fallback.
-- Drug is what the experimental arms received. Placebo-like names are dropped, comparators are kept with a role so the lemborexant trial doesn't count as a zolpidem trial.
+- Age range is the protocol's eligibility, not the ages of who enrolled, and it is stored as written: no bound means NULL (more than half of studies set no upper bound), "130 Years" stays 130. Queries treat NULL as "no bound".
+- Sex reflects enrollment from the baseline sex table, with eligibility as fallback: MF when both enrolled, F or M otherwise.
+- Drug is what the experimental arms received. Placebo-like names are dropped; comparators are not stored because the new study_drugs has no role column, so the lemborexant trial does not count as a zolpidem trial.
+- MeSH pairing is by name. ClinicalTrials.gov gives one flat list of MeSH terms per study, not one per intervention. A term that appears in a drug's name (or the reverse, whole words only) is that drug's term; when exactly one drug and one term are left over they are paired, which is how code names like BAY94-9027 get "Factor VIII". A drug that still has no term keeps its own name, minus the dose, so drug_mesh is never empty.
 
 Where it's good, and where it isn't
 
 Good:
 
 - The rules are testable and tested. Because the parser does no I/O, every rule has a test against a real response shape. When a teammate finds a mislabeled study, they add a case and fix the regex.
-- It hits the API fifteen times, ever. Raw pages stay on disk, so parsing can be re-run offline all weekend and the demo doesn't depend on venue Wi-Fi.
-- Provenance everywhere. Raw labels, the table each count came from, raw age strings, source URL, fetch time. The frontend contract asks for auditable evidence and this gives it.
+- It hits the API thirteen times, ever. Raw pages stay on disk, so parsing can be re-run offline all weekend and the demo doesn't depend on venue Wi-Fi. The full load takes 14 seconds.
+- Provenance where the schema allows it. Raw labels, the table each count came from, skip counts by reason, load time and filter in meta. The frontend contract asks for auditable evidence and this gives it.
 - Tiny footprint. Standard-library SQLite, requests, Flask. Nothing to install or run besides Python.
 
 Not good, or not yet:
 
-- It overlaps your existing backend. harmonize.py in Drug_Me_Finder already does a similar job and stores JSON blobs; this stores normalized columns. Two pipelines for one dataset is a maintenance tax. You should pick one, and the honest recommendation is to keep this schema and port the pieces of the old harmonizer this one lacks.
 - It drops the observed ages. The old harmonizer keeps mean age and age bands from the baseline table; this only keeps eligibility bounds. If the app wants "people my age", that has to come back.
-- Race bucketing is a heuristic. Mixed labels like "Black Hispanic" get forced into one bucket, and only the first race table per study is used. Expect a small error rate, and expect to tune the regexes after the first real run.
-- It has never seen real data. Only fixtures. The first full ingest will surface edge cases the tests don't cover.
-- It isn't the API the frontend expects. The React app wants camelCase /api/v1 shapes with scores and tiers. This is the data layer underneath; an adapter or the existing v1 blueprint still has to sit on top.
+- Race bucketing is a heuristic. Mixed labels like "Black Hispanic" get forced into one bucket, and only the first race table per study is used. Expect a small error rate, and expect to tune the regexes after looking at real rows.
+- MeSH pairing is a heuristic too. Name matching covers most drugs and elimination covers most code names, but two unmatched drugs sharing one leftover term stay unpaired on purpose. MeSH terms keep the source's casing, which splits about 2% of drug groups ("Bupivacaine" vs "bupivacaine"); compare with lower().
+- No comparators, no title, no dates. The schema dropped them, so a search by a comparator drug no longer finds the trial, and the report cannot show when a study ran.
+- It isn't the API the frontend was first designed for. The React app wanted camelCase /api/v1 shapes with scores and tiers; src/api.ts adapts the study rows client-side and reads only the first 200 studies for the dashboard. A server-side per-drug aggregate is the natural next step.
 - Pooling has the usual registry caveat. Summing across trials counts people twice when extension studies re-enroll them. That's inherent to the source, but the UI should say so.
