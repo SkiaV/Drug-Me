@@ -1,0 +1,5 @@
+.env
+.venv
+__pychache__
+SQLite/data
+SQLite/schema.sql
