@@ -1,4 +1,4 @@
 .env
-.venv
-__pychache__
-SQLite\ Builder/__pycache__
+.venv/
+__pycache__/
+SQLite/data/*.db

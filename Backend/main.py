@@ -15,14 +15,14 @@ app = Flask(__name__)
 
 @app.route('/')
 def hello():
-    return 'Hello, World!' 
+    return 'Hello, World!'
 
 # Dashboard
 @app.route('/dashboard')
 def dashboard():
     return 'Dashboard Page (homepage)'
 
-# Report 
+# Report
 @app.route('/report')
 def report():
     return 'Report Page (Big circle)'

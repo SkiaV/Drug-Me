@@ -1,0 +1,10 @@
+{
+  "description": "Analyze clinical trial representativeness by sex, age, and race with dashboards, advanced searches, and personalized drug reports for informed decisions.",
+  "robots": {
+    "index": false
+  },
+  "accessibility": {
+    "addBypassLinks": false,
+    "ignoreReducedMotion": false
+  }
+}

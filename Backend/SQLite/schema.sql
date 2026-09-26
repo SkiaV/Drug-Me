@@ -48,7 +48,7 @@ CREATE INDEX IF NOT EXISTS ix_study_races_category ON study_races (category, dim
 -- The "; "-joined `drug`/`drug_mesh` strings from `studies`, split one per
 -- row so `WHERE drug = ?` and `WHERE condition LIKE ?`-style lookups work.
 -- Raw arm-level drugs (DRUG/BIOLOGICAL/COMBINATION_PRODUCT) and their
--- MeSH-normalized counterparts (MESH) both live here; 
+-- MeSH-normalized counterparts (MESH) both live here;
 CREATE TABLE IF NOT EXISTS study_drugs (
     nct_id            TEXT NOT NULL REFERENCES studies (nct_id) ON DELETE CASCADE,
     drug              TEXT NOT NULL,   -- lower-cased for matching
