@@ -16,8 +16,11 @@ import {
   type DrugSummary,
   type SearchFilters,
 } from "./api";
+import Banner from "./components/Banner";
+import Explainer from "./components/Explainer";
+import { homeMetaSnapshot, loadHomeMeta, type HomeMeta } from "./homeData";
 
-type Route = "dashboard" | "search" | "report";
+type Route = "home" | "dashboard" | "search" | "report";
 
 const defaultProfile: DemographicProfile = {
   age: 67,
@@ -30,6 +33,9 @@ const defaultFilters: SearchFilters = {
   drug: "",
   indication: "",
 };
+
+const demoReportPath =
+  "/report/fluoxetine?age=67&sex=Female&race=Black%20or%20African%20American";
 
 function Icon({
   name,
@@ -111,9 +117,11 @@ function Icon({
 }
 
 function routeFromPath(): Route {
-  if (window.location.pathname.startsWith("/advanced-search")) return "search";
-  if (window.location.pathname.startsWith("/report")) return "report";
-  return "dashboard";
+  const path = window.location.pathname;
+  if (path.startsWith("/dashboard")) return "dashboard";
+  if (path.startsWith("/advanced-search") || path.startsWith("/search")) return "search";
+  if (path.startsWith("/report")) return "report";
+  return "home";
 }
 
 function useRoute() {
@@ -203,17 +211,20 @@ function AppShell({
     <div className="app-shell">
       <header className="site-header">
         <button className="brand" onClick={() => navigate("/")} type="button">
-          <span>CTR</span>
-          <strong>
-            Clinical Trial
-            <br />
-            Representation
-          </strong>
+          <img alt="" className="brand__icon" height="44" src="/drugme-icon-256.png" width="44" />
+          <span className="brand__text">Drug Me</span>
         </button>
         <nav aria-label="Primary navigation">
           <button
-            aria-current={route === "dashboard" ? "page" : undefined}
+            aria-current={route === "home" ? "page" : undefined}
             onClick={() => navigate("/")}
+            type="button"
+          >
+            Home
+          </button>
+          <button
+            aria-current={route === "dashboard" ? "page" : undefined}
+            onClick={() => navigate("/dashboard")}
             type="button"
           >
             Dashboard
@@ -227,11 +238,7 @@ function AppShell({
           </button>
           <button
             aria-current={route === "report" ? "page" : undefined}
-            onClick={() =>
-              navigate(
-                "/report/fluoxetine?age=67&sex=Female&race=Black%20or%20African%20American",
-              )
-            }
+            onClick={() => navigate(demoReportPath)}
             type="button"
           >
             Individual report
@@ -367,6 +374,31 @@ function DrugTable({
         </tbody>
       </table>
     </div>
+  );
+}
+
+function Home({ navigate }: { navigate: (path: string) => void }) {
+  const [meta, setMeta] = useState<HomeMeta>(homeMetaSnapshot);
+
+  useEffect(() => {
+    let cancelled = false;
+    loadHomeMeta().then((data) => {
+      if (!cancelled) setMeta(data);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  return (
+    <main className="page">
+      <Banner meta={meta} />
+      <Explainer
+        meta={meta}
+        onBrowse={() => navigate("/dashboard")}
+        onCheck={() => navigate(demoReportPath)}
+      />
+    </main>
   );
 }
 
@@ -892,6 +924,7 @@ export default function App() {
 
   return (
     <AppShell navigate={navigate} route={route}>
+      {route === "home" && <Home navigate={navigate} />}
       {route === "dashboard" && <Dashboard navigate={navigate} />}
       {route === "search" && <AdvancedSearch navigate={navigate} />}
       {route === "report" && <IndividualReport navigate={navigate} />}

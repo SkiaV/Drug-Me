@@ -216,6 +216,10 @@ function summarize(studies: Study[], updatedAt?: string): DrugSummary[] {
   });
 }
 
+export async function getStats(): Promise<BackendStats> {
+  return request<BackendStats>("/api/studies/stats");
+}
+
 export async function getDashboard(): Promise<DashboardData> {
   const [result, stats] = await Promise.all([
     request<StudyList>("/api/studies?limit=200"),
