@@ -333,7 +333,7 @@ function DrugTable({
           <tr>
             <th>Name</th>
             <th>Most common use</th>
-            <th>Least researched</th>
+            <th>Least represented group</th>
             <th>{scoreLabel}</th>
           </tr>
         </thead>

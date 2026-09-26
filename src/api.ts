@@ -142,6 +142,76 @@ function describeAge(study: BackendStudy) {
   return `${lower} to ${upper}`;
 }
 
+function leastRepresentedSex(rows: BackendStudy[]) {
+  const reportedRows = rows.filter(
+    (row) => row.female_count !== null && row.male_count !== null,
+  );
+  if (!reportedRows.length) return "Sex enrollment unavailable";
+
+  const female = reportedRows.reduce((sum, row) => sum + row.female_count!, 0);
+  const male = reportedRows.reduce((sum, row) => sum + row.male_count!, 0);
+  if (female === male) return "Female and male participants (tied)";
+  return female < male ? "Female participants" : "Male participants";
+}
+
+function leastReportedRace(rows: BackendStudy[]) {
+  const labels: Record<string, string> = {
+    white: "White",
+    black: "Black or African American",
+    asian: "Asian",
+    aian: "American Indian or Alaska Native",
+    nhpi: "Native Hawaiian or Pacific Islander",
+    multiracial: "Multiracial",
+    other: "Other reported race",
+  };
+  const totals = new Map<string, number>();
+  const reportedLabels = new Map<string, string>();
+
+  for (const row of rows) {
+    for (const race of row.race_composition ?? []) {
+      const category = race.category.toLowerCase();
+      if (race.dimension !== "race" || category === "unknown") continue;
+      totals.set(category, (totals.get(category) ?? 0) + race.count);
+      reportedLabels.set(
+        category,
+        labels[category] ?? titleCase(race.demographic),
+      );
+    }
+  }
+
+  if (totals.size < 2) return "Insufficient race-group data";
+  const leastCount = Math.min(...totals.values());
+  const leastGroups = [...totals.entries()]
+    .filter(([, count]) => count === leastCount)
+    .map(([category]) => reportedLabels.get(category) ?? category);
+  if (leastGroups.length > 1) return `${leastGroups.join(", ")} (tied)`;
+  return `${leastGroups[0]} participants (reported)`;
+}
+
+function leastEligibleAgeGroup(rows: BackendStudy[]) {
+  if (!rows.length) return "Age eligibility unavailable";
+
+  const ageBands = [
+    { label: "Children (<18)", min: 0, max: 17 },
+    { label: "Adults (18-64)", min: 18, max: 64 },
+    { label: "Adults 65+", min: 65, max: 100 },
+  ];
+  const support = ageBands.map((band) => ({
+    ...band,
+    studies: rows.filter((row) => {
+      const lower = row.age_lower ?? 0;
+      const upper = row.age_upper ?? 100;
+      return lower <= band.max && upper >= band.min;
+    }).length,
+  }));
+  const leastCount = Math.min(...support.map((band) => band.studies));
+  const leastBands = support.filter((band) => band.studies === leastCount);
+  if (leastBands.length > 1) {
+    return `${leastBands.map((band) => band.label).join(", ")} eligibility (tied)`;
+  }
+  return `${leastBands[0].label} eligibility`;
+}
+
 function toDrugSummaries(studies: BackendStudy[], updatedAt?: string): DrugSummary[] {
   if (!Array.isArray(studies)) return [];
   const groups = new Map<string, BackendStudy[]>();
@@ -186,10 +256,10 @@ function toDrugSummaries(studies: BackendStudy[], updatedAt?: string): DrugSumma
     const weakest = Object.entries(components).sort((a, b) => a[1] - b[1])[0][0];
     const leastResearched =
       weakest === "age"
-        ? { dimension: "Age" as const, group: "Narrow age eligibility" }
+        ? { dimension: "Age" as const, group: leastEligibleAgeGroup(rows) }
         : weakest === "sex"
-          ? { dimension: "Sex" as const, group: "Enrollment imbalance" }
-          : { dimension: "Race" as const, group: "Race reporting incomplete" };
+          ? { dimension: "Sex" as const, group: leastRepresentedSex(rows) }
+          : { dimension: "Race" as const, group: leastReportedRace(rows) };
 
     return {
       id: name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, ""),

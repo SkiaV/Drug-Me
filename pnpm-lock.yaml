@@ -9,10 +9,10 @@ importers:
   .:
     dependencies:
       react:
-        specifier: ^19.0.0
+        specifier: 19.2.4
         version: 19.2.4
       react-dom:
-        specifier: ^19.0.0
+        specifier: 19.2.4
         version: 19.2.4(react@19.2.4)
     devDependencies:
       '@tailwindcss/vite':
@@ -40,7 +40,7 @@ importers:
         specifier: ^5.7.0
         version: 5.9.3
       vite:
-        specifier: ^8.3.1
+        specifier: ^8.0.5
         version: 8.3.1(@types/node@22.19.17)(jiti@2.6.1)
 
 packages:
