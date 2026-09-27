@@ -161,6 +161,8 @@ export type DrugReport = {
   };
   evidence: EvidenceItem[];
   details?: ReportDetails;
+  /** Context (label, FAERS, approval, class, prevalence) that could not be fetched this time. */
+  warnings?: string[];
 };
 
 export type Meta = {

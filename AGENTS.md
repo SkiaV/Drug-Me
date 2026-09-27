@@ -28,6 +28,8 @@ This is the canonical project structure. Start with task-relevant files below. O
 - `.mise.toml` - Toolchain versions for Node.js and pnpm
 - `backend/app.py` - Flask API entrypoint (`/api/v1`), also serves the built app from `dist/`
 - `backend/data/registry.sqlite` - Harvested ClinicalTrials.gov registry read by that API
+- `backend/data/extras.sqlite` - Per-drug label/FAERS/approval/class/prevalence pieces (committed; filled by `backend/prewarm.py` or the first report)
+- `backend/registry.py` - The one rule for which harvested trials count for a drug, shared by the table (`build_table.py`) and the report (`report.py`)
 - `Backend copy/SQLite Builder/` - The study-level SQLite store (`ingest.py`) and its query API (`api.py`, port 5001)
 
 ## Dependencies

@@ -1,12 +1,18 @@
-"""SQLite store for harmonized trials and the researcher table.
+"""SQLite store for harmonized trials, the researcher table, and per-drug enrichment.
 
-Kept deliberately tiny (stdlib sqlite3, three tables) so a teammate can swap in Postgres/Tiger Data by
-replacing connect() and the two DDL statements.
+Two files:
+  * registry.sqlite  trials, trial_drugs, drug_rows, meta. Rebuilt only by harvest.py / build_table.py.
+  * extras.sqlite    drug_extras: the profile-independent, network-derived part of a report (RxClass, FDA label
+                     sentences, FAERS split, approval date, CDC prevalence) keyed by drug name. A few KB per drug,
+                     committed, filled by prewarm.py or by the first report for a drug. It is what lets every
+                     dashboard report render with the Wi-Fi off.
+Kept deliberately tiny (stdlib sqlite3) so a teammate can swap in Postgres by replacing connect() and the DDL.
 """
 import json
 import sqlite3
+import time
 
-from config import DB_PATH
+from config import DB_PATH, EXTRAS_PATH
 
 DDL = """
 CREATE TABLE IF NOT EXISTS trials (nct TEXT PRIMARY KEY, data TEXT NOT NULL);
@@ -15,11 +21,20 @@ CREATE INDEX IF NOT EXISTS ix_trial_drugs_name ON trial_drugs(name);
 CREATE TABLE IF NOT EXISTS drug_rows (name TEXT PRIMARY KEY, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
 """
+EXTRAS_DDL = """
+CREATE TABLE IF NOT EXISTS drug_extras (name TEXT PRIMARY KEY, data TEXT NOT NULL, fetched_at REAL NOT NULL);
+"""
 
 
 def connect():
     con = sqlite3.connect(DB_PATH)
     con.executescript(DDL)
+    return con
+
+
+def connect_extras():
+    con = sqlite3.connect(EXTRAS_PATH)
+    con.executescript(EXTRAS_DDL)
     return con
 
 
@@ -31,6 +46,15 @@ def store_trials(records: list[dict]):
         rows = [(name, r["nct"]) for r in records if r.get("nct") for name in r.get("drug_names", [])]
         con.executemany("INSERT OR IGNORE INTO trial_drugs(name, nct) VALUES (?, ?)", rows)
     con.close()
+
+
+def trials_with_name(name: str) -> list[dict]:
+    """Trials whose drug names (MeSH terms, intervention names, other names) contain exactly `name`."""
+    con = connect()
+    out = [json.loads(d) for (d,) in con.execute(
+        "SELECT t.data FROM trial_drugs d JOIN trials t ON t.nct = d.nct WHERE d.name = ?", (name.lower().strip(),))]
+    con.close()
+    return out
 
 
 def trials_for_names(names: list[str]) -> list[dict]:
@@ -94,3 +118,34 @@ def get_meta(key, default=None):
     row = con.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
     con.close()
     return json.loads(row[0]) if row else default
+
+
+# ---- extras: the network-derived part of a report, one row per drug ----
+
+def get_extras(name: str, max_age_days: float | None = None) -> dict | None:
+    con = connect_extras()
+    row = con.execute("SELECT data, fetched_at FROM drug_extras WHERE name = ?", (name.lower().strip(),)).fetchone()
+    con.close()
+    if not row:
+        return None
+    if max_age_days is not None and time.time() - row[1] > max_age_days * 86400:
+        return None
+    data = json.loads(row[0])
+    data["_fetched_at"] = row[1]
+    return data
+
+
+def set_extras(name: str, data: dict):
+    data = {k: v for k, v in data.items() if not k.startswith("_")}
+    con = connect_extras()
+    with con:
+        con.execute("INSERT OR REPLACE INTO drug_extras(name, data, fetched_at) VALUES (?, ?, ?)",
+                    (name.lower().strip(), json.dumps(data), time.time()))
+    con.close()
+
+
+def extras_count() -> int:
+    con = connect_extras()
+    n = con.execute("SELECT COUNT(*) FROM drug_extras").fetchone()[0]
+    con.close()
+    return n

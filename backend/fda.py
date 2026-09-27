@@ -1,4 +1,5 @@
 """openFDA: the drug label (what FDA admits about your group), FAERS (who reports side effects), approval date."""
+import concurrent.futures as cf
 import datetime as dt
 import re
 
@@ -46,12 +47,23 @@ def _pick_label(results: list[dict], brand_hint: str | None):
     return max(results, key=key)
 
 
-def label(rxcui: str, generic: str, brand_hint: str | None = None) -> dict | None:
-    data = openfda("label", search=f'openfda.rxcui:"{rxcui}"', limit=25)
-    results = data.get("results", [])
-    if not results:
-        data = openfda("label", search=f'openfda.generic_name:"{generic}"', limit=25)
-        results = data.get("results", [])
+def _labels(search: str) -> list[dict]:
+    return openfda("label", search=search, sort="effective_time:desc", limit=3).get("results", [])
+
+
+def label(rxcui: str | None, generic: str, brand_hint: str | None = None) -> dict | None:
+    """The newest label for the drug, preferring the brand the user named. One small request in the common case
+    (was: two requests of 25 whole labels, about 20 MB per drug). rxcui may be None when RxNorm did not know the name."""
+    results = []
+    bases = ([f'openfda.generic_name:"{generic}"'] if generic else []) + ([f'openfda.rxcui:"{rxcui}"'] if rxcui else [])
+    for base in bases:
+        if brand_hint:
+            results = _labels(f'{base} AND openfda.brand_name:"{brand_hint}"')
+            if results:
+                break
+        results = _labels(base)
+        if results:
+            break
     lab = _pick_label(results, brand_hint)
     if not lab:
         return None
@@ -98,25 +110,34 @@ def _sex_counts(search: str | None) -> dict:
     return {"female": counts.get(2, 0), "male": counts.get(1, 0), "unknown": counts.get(0, 0)}
 
 
+def _share(c: dict):
+    d = c["female"] + c["male"]
+    return round(c["female"] / d, 4) if d else None
+
+
 def faers(generic: str, years: int = 12) -> dict:
-    base = _sex_counts(None)
     q = f'patient.drug.openfda.generic_name:"{generic}"'
-    drug = _sex_counts(q)
-    def share(c):
-        d = c["female"] + c["male"]
-        return round(c["female"] / d, 4) if d else None
-    series = []
     this_year = dt.date.today().year
-    for y in range(this_year - years, this_year + 1):
-        c = _sex_counts(f'{q} AND receivedate:[{y}0101 TO {y}1231]')
-        if c["female"] + c["male"]:
-            series.append({"year": y, "female": c["female"], "male": c["male"]})
-    drug_share, base_share = share(drug), share(base)
-    reactions = {}
-    for sex_code, key in ((2, "female"), (1, "male")):
-        rows = openfda("event", search=f"{q} AND patient.patientsex:{sex_code}",
-                       count="patient.reaction.reactionmeddrapt.exact", limit=100).get("results", [])
-        reactions[key] = {r["term"]: r["count"] for r in rows}
+    with cf.ThreadPoolExecutor(max_workers=6) as ex:
+        f_base, f_drug = ex.submit(_sex_counts, None), ex.submit(_sex_counts, q)
+        base, drug = f_base.result(), f_drug.result()
+        total = drug["female"] + drug["male"] + drug["unknown"]
+        if total == 0:  # investigational / obscure names: no point spending 15 more requests on empty years
+            return {"reports": 0, "female": 0, "male": 0, "female_share": None, "baseline_female_share": _share(base),
+                    "ratio": None, "by_year": [], "reactions_skew_female": [], "reactions_skew_male": [],
+                    "note": "No FAERS reports mention this generic name."}
+        f_years = {y: ex.submit(_sex_counts, f'{q} AND receivedate:[{y}0101 TO {y}1231]')
+                   for y in range(this_year - years, this_year + 1)}
+        f_react = {key: ex.submit(openfda, "event", search=f"{q} AND patient.patientsex:{code}",
+                                  count="patient.reaction.reactionmeddrapt.exact", limit=100)
+                   for code, key in ((2, "female"), (1, "male"))}
+        series = []
+        for y, f in f_years.items():
+            c = f.result()
+            if c["female"] + c["male"]:
+                series.append({"year": y, "female": c["female"], "male": c["male"]})
+        reactions = {key: {r["term"]: r["count"] for r in f.result().get("results", [])} for key, f in f_react.items()}
+    drug_share, base_share = _share(drug), _share(base)
     tw, tm = sum(reactions["female"].values()) or 1, sum(reactions["male"].values()) or 1
     skew = []
     for term, w in reactions["female"].items():
@@ -125,7 +146,7 @@ def faers(generic: str, years: int = 12) -> dict:
             skew.append({"reaction": term.title(), "female": w, "male": m, "ratio": round((w / tw) / (m / tm), 2)})
     skew.sort(key=lambda r: -r["ratio"])
     return {
-        "reports": drug["female"] + drug["male"] + drug["unknown"],
+        "reports": total,
         "female": drug["female"], "male": drug["male"],
         "female_share": drug_share,
         "baseline_female_share": base_share,

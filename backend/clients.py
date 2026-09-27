@@ -5,22 +5,33 @@ Every GET is cached to data/cache/<sha1(url)>.json the first time it succeeds, s
   * we never burn openFDA's 1,000/day keyless quota twice on the same question,
   * teammates get identical results.
 The api_key is stripped from the cache key so cached files don't depend on whose key was used.
+STATS counts live (uncached) requests per host since startup; prewarm.py uses it to stay inside the quota.
 """
+import collections
 import hashlib
 import json
+import threading
 import time
+from urllib.parse import urlparse
 
 import requests
 
-from config import CACHE_DIR, CACHE_TTL_DAYS, HTTP_TIMEOUT, OPENFDA_API_KEY, SOCRATA_APP_TOKEN, USER_AGENT
+from config import CACHE_DIR, CACHE_TTL_DAYS, HTTP_RETRIES, HTTP_TIMEOUT, OPENFDA_API_KEY, SOCRATA_APP_TOKEN, USER_AGENT
 
 _session = requests.Session()
 _session.headers["User-Agent"] = USER_AGENT
 _session.headers["Accept"] = "application/json"
 
+STATS: collections.Counter = collections.Counter()
+_stats_lock = threading.Lock()
+
 
 class ApiError(Exception):
     pass
+
+
+class QuotaError(ApiError):
+    """HTTP 429: the per-minute or per-day quota is spent. Callers should stop hammering, not retry."""
 
 
 def _cache_path(url: str):
@@ -36,8 +47,11 @@ def get_json(url: str, params: dict | None = None, headers: dict | None = None,
     if path.exists() and (time.time() - path.stat().st_mtime) < ttl_days * 86400:
         return json.loads(path.read_text(encoding="utf-8"))
 
-    last = None
-    for attempt in range(4):
+    host = urlparse(url).netloc
+    last: Exception | None = None
+    for attempt in range(HTTP_RETRIES):
+        with _stats_lock:
+            STATS[host] += 1
         try:
             resp = _session.get(full_url, headers=headers, timeout=HTTP_TIMEOUT)
         except requests.RequestException as exc:  # network blip: back off and retry
@@ -49,16 +63,25 @@ def get_json(url: str, params: dict | None = None, headers: dict | None = None,
             data = {"results": [], "meta": {"results": {"total": 0}}}
             path.write_text(json.dumps(data), encoding="utf-8")
             return data
-        if resp.status_code in (429, 500, 502, 503, 504):
-            last = ApiError(f"{resp.status_code} from {url}")
-            time.sleep(2 ** attempt)
+        if resp.status_code == 429:
+            last = QuotaError(f"429 rate limit from {host}")
+            time.sleep(2 * (attempt + 1))  # the per-minute window passes quickly; a spent daily quota will not
+            continue
+        if resp.status_code in (500, 502, 503, 504):
+            last = ApiError(f"{resp.status_code} from {host}")
+            time.sleep(1 + attempt)
             continue
         if resp.status_code >= 400:
             raise ApiError(f"{resp.status_code} from {full_url[:200]}: {resp.text[:200]}")
-        data = resp.json()
+        try:
+            data = resp.json()
+        except ValueError as exc:
+            raise ApiError(f"non-JSON response from {host}: {exc}") from exc
         path.write_text(json.dumps(data), encoding="utf-8")
         return data
-    raise ApiError(f"gave up on {url}: {last}")
+    if isinstance(last, ApiError):
+        raise last
+    raise ApiError(f"gave up on {host}: {last}")
 
 
 def openfda(endpoint: str, **params):

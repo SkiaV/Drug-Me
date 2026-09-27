@@ -8,6 +8,7 @@ import re
 from flask import Blueprint, jsonify, request
 
 import db
+import registry
 import report as report_mod
 import rxnorm
 import scoring
@@ -29,8 +30,7 @@ GROUP_LABEL = {
 RACE_KEYS = ("black", "asian", "aian", "nhpi", "multiracial", "hispanic")
 
 
-def slug(name: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+slug = registry.slug  # one definition for dashboard ids and report ids
 
 
 def _err(code, message, status=400):
@@ -255,15 +255,37 @@ def _strengths_and_gaps(rep):
     return strengths[:6], gaps[:8]
 
 
+def _label_note(label_missing: bool, warnings: list[str]) -> str:
+    if not label_missing:
+        return "No sentence in the current label singles out a sex, age or ancestry group for dosing or risk."
+    if any("label" in w.lower() for w in warnings):
+        return "The FDA label could not be fetched right now; reload the report to try again."
+    return ("openFDA has no label under this name (biologics, investigational and discontinued products are often "
+            "missing), so the label check could not run.")
+
+
 @bp.get("/drugs/<drug_id>/report")
 def drug_report(drug_id):
     a = request.args
     keys, profile_out, (sex, age, race, eth) = profile_keys(a)
-    name = drug_id.replace("-", " ")
-    rep = report_mod.build(name, sex, age, race, eth, include_faers=a.get("faers", "1") != "0")
+    include_faers = a.get("faers", "1") != "0"
+    # A dashboard row's id is the slug of its registry (MeSH) name: use that exact row, never a name guess, so the
+    # report shows the same trials and numbers as the table. Anything else is a typed brand or generic name.
+    row = registry.row_for_slug(drug_id) or registry.row_for_slug(registry.slug(drug_id))
+    if row:
+        name = row["drug"]
+        rep = report_mod.build(name, sex, age, race, eth, include_faers=include_faers, registry_row=row)
+    else:
+        name = drug_id.replace("-", " ")
+        rep = report_mod.build(name, sex, age, race, eth, include_faers=include_faers)
+        if not rep and "-" in drug_id:  # hyphenated names (interleukin-2, co-trimoxazole) RxNorm knows as typed
+            rep = report_mod.build(drug_id, sex, age, race, eth, include_faers=include_faers)
     if not rep:
-        return _err("not_found", f"No drug called '{name}' found.", 404)
+        sugg = rxnorm.suggest(name, 5)
+        hint = f" Did you mean: {', '.join(sugg)}?" if sugg else ""
+        return _err("not_found", f"No drug called '{name}' found.{hint}", 404)
     ev, lab = rep["evidence"], rep.get("label_flags") or {}
+    label_missing = rep.get("label_flags") is None
     by_key = {g["key"]: g for g in rep["groups"]}
 
     def ppr_of(k):
@@ -348,12 +370,13 @@ def drug_report(drug_id):
         "questions": rep["card"]["questions"],
         "strengths": strengths,
         "gaps": gaps,
+        "warnings": rep.get("warnings", []),
         "fdaContext": {
             "indication": rep["drug"]["summary"] or drug["primaryUse"],
             "labelUpdated": lab.get("effective_time"),
             "brand": lab.get("brand"),
-            "note": (lab.get("flags") or [{}])[0].get("quote") if lab.get("flags") else
-                    "No sentence in the current label singles out a sex, age or ancestry group for dosing or risk.",
+            "note": (lab.get("flags") or [{}])[0].get("quote") if lab.get("flags")
+                    else _label_note(label_missing, rep.get("warnings", [])),
             "flags": lab.get("flags") or [],
             "insufficient65": lab.get("insufficient_65_boilerplate", False),
             "sourceUrl": f"https://dailymed.nlm.nih.gov/dailymed/drugInfo.cfm?setid={set_id}" if set_id else "https://open.fda.gov/apis/drug/label/",

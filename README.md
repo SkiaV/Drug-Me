@@ -30,9 +30,25 @@ $env:PORT = "5173"; npx pnpm@10.34.3 dev
 Open http://127.0.0.1:5000 and try **Ambien** with sex = female, age = 67.
 
 The harvested registry ships in the repo (`backend/data/registry.sqlite`: every Phase 3 trial with posted
-results, harmonized, plus one precomputed row per drug), so the dashboard and the search work offline. The first
-report for a new medicine calls five public APIs (about 15 seconds); every response is cached to disk, so later
-requests are instant and offline-safe. To rebuild the registry from ClinicalTrials.gov (about 15 requests):
+results, harmonized, plus one precomputed row per drug), so the dashboard, the search, and the trials and score of
+every report work offline. The first report for a medicine also asks RxNorm, openFDA and the CDC for brands, label
+sentences, side-effect reports, approval date and prevalence (a few seconds); each answer is stored in
+`backend/data/extras.sqlite` (committed) and the raw responses in `backend/data/cache/` (ignored), so later reports
+are instant and offline. If one of those services is down or rate-limited the report still renders, with a note
+about the missing piece. Before a demo, fill the extras for the whole dashboard on good Wi-Fi:
+
+```powershell
+.\.venv\Scripts\python.exe backend\prewarm.py              # dashboard drugs, least covered first; resumable
+.\.venv\Scripts\python.exe backend\prewarm.py --limit 60   # just the top of the dashboard
+```
+
+**API keys.** Keys live in `backend/.env` on each machine (copy `.env.example`); the file is git-ignored and must
+never be committed. GitHub repository secrets are for Actions and would not reach anyone's laptop, so share a key
+over a direct message and each teammate pastes it into their own `.env`. The app works with no key at all: openFDA
+then allows 1,000 requests per day per IP address (about 50 first-time reports, and shared venue Wi-Fi counts as
+one address). A free key from https://open.fda.gov/apis/authentication/ (instant) raises that to 120,000 per day.
+
+To rebuild the registry from ClinicalTrials.gov (about 15 requests):
 
 ```powershell
 .\.venv\Scripts\python.exe backend\harvest.py
@@ -42,7 +58,7 @@ requests are instant and offline-safe. To rebuild the registry from ClinicalTria
 Tests:
 
 ```powershell
-cd backend; python -m pytest -q                        # harmonization rules
+cd backend; python -m pytest -q                        # harmonization, trial selection, report resilience
 cd "Backend copy\SQLite Builder"; python -m pytest -q   # the study-level store: parser, validation, SQL round trip
 npx tsc --noEmit -p tsconfig.json --ignoreDeprecations 5.0
 ```
@@ -97,8 +113,8 @@ API.
 | Path | What it is |
 |---|---|
 | `src/` | React app (Vite + TypeScript): `App.tsx` routes, `api.ts` models + requests, `components/`, `hooks.ts`, styles |
-| `backend/` | Flask API: `app.py` (routes + serves `dist/`), `api_v1.py` (the contract above), `report.py`, `scoring.py`, `harmonize.py`, `rxnorm.py`, `fda.py`, `prevalence.py`, `card.py`, `harvest.py`, `build_table.py`, `db.py`, `tests/` |
-| `backend/data/` | `registry.sqlite` (committed), `displaynames.json` (RxNorm names for autocomplete), `cache/` and `raw/` (built locally, ignored) |
+| `backend/` | Flask API: `app.py` (routes + serves `dist/`), `api_v1.py` (the contract above), `report.py`, `registry.py` (which trials count for a drug), `scoring.py`, `harmonize.py`, `rxnorm.py`, `fda.py`, `prevalence.py`, `card.py`, `harvest.py`, `build_table.py`, `prewarm.py`, `db.py`, `tests/` |
+| `backend/data/` | `registry.sqlite` and `extras.sqlite` (committed), `displaynames.json` (RxNorm names for autocomplete), `cache/` and `raw/` (built locally, ignored) |
 | `Backend copy/SQLite Builder/` | The study-level SQLite store: `ingest.py` → `studies.db`, `parse_study.py`, `validation.py`, `api.py`, `tests/` |
 | `.figma/`, `AGENTS.md` | The Figma Make scaffold this frontend started from |
 
@@ -109,8 +125,14 @@ only ~15,000 Phase 3 trials have posted results, so the whole registry is 15 req
 harmonized in SQLite; `/report` reads from that store (falling back to a live query for drugs outside it) and the
 dashboard is only possible because of it. It also means the demo does not depend on the venue Wi-Fi.
 
-**Every external response is cached to disk** (`backend/data/cache`). openFDA allows 1,000 requests a day per IP
-without a key; the cache is what makes that survivable on a shared campus network.
+**Every external response is cached twice.** Raw responses land in `backend/data/cache` (ignored, large); the
+derived per-drug pieces (label sentences, FAERS split, approval, class, prevalence) land in
+`backend/data/extras.sqlite` (committed, a few KB per drug). openFDA allows 1,000 requests a day per IP without a
+key; the caches and `prewarm.py` are what make that survivable on a shared campus network.
+
+**A report never fails because a service did.** Trials and the score come from SQLite. The five network pieces are
+fetched in parallel under one deadline; whatever fails or times out becomes a `warnings` line the page shows, and
+only successful pieces are stored, so a transient failure is retried on the next request.
 
 **Two denominators.** The published metric (participation-to-prevalence ratio, Scott et al., JACC 2018) divides a
 group's share of trial participants by its share of the *disease* population. The US population alone would flag a
@@ -121,8 +143,11 @@ The UI shows both.
 **Design exclusions count as evidence, not missing data.** A trial with a maximum age of 64 did not "fail to
 report" people over 65; it excluded them. `scoring.py` counts such trials as known zeros for that group.
 
-**Comparator trials are excluded.** Searching for zolpidem returns lemborexant's 1,006-person trial, where zolpidem
-was the comparator. Only trials with the drug in an EXPERIMENTAL arm count.
+**Comparator trials are excluded, by one rule.** Searching for zolpidem returns lemborexant's 1,006-person trial,
+where zolpidem was the comparator and a "zolpidem-matching placebo" sat in the experimental arms. Only trials with
+the drug itself in an EXPERIMENTAL arm count; placebo/matching/dummy interventions never stand for the drug. The
+table and the report share this rule (`backend/registry.py`), so a dashboard row and its report show the same
+trials and numbers.
 
 **Race harmonization is rule-based and tested.** About 45% of race tables are free text. `harmonize.map_race` maps
 labels with an ordered regex table (unit-tested); anything it cannot place lands in "other" rather than

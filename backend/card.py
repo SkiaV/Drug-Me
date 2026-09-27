@@ -29,7 +29,8 @@ def rule_based(report: dict) -> dict:
             lines.append("Its approval predates the registry's results reporting (2008), so the trials that got it approved are not visible here.")
         questions.append(f"Were the studies that approved {drug} done on people like me?")
     else:
-        lines.append(f"{ev['trials']} Phase 3 trial(s) with posted results, {ev['participants']:,} participants, {ev['years'][0]}–{ev['years'][1]}.")
+        years = f", {ev['years'][0]}–{ev['years'][1]}" if ev.get("years") and ev["years"][0] and ev["years"][1] else ""
+        lines.append(f"{ev['trials']} Phase 3 trial(s) with posted results, {ev['participants']:,} participants{years}.")
         for k in prof.get("groups", []):
             g = by_key.get(k)
             if not g:
@@ -52,9 +53,9 @@ def rule_based(report: dict) -> dict:
                     questions.append(f"The trials under-enrolled {who}. Is there evidence {drug} works the same for me?")
                 if g["trials_design_excluded"] and g["trials_design_excluded"] == ev["trials"]:
                     questions.append(f"Every trial excluded {who} by design. What is the dosing for {who} based on?")
-    for f in report.get("label_flags", {}).get("flags", [])[:3]:
+    for f in (report.get("label_flags") or {}).get("flags", [])[:3]:
         lines.append(f"The FDA label says: \"{f['quote'][:220]}\"")
-    if report.get("label_flags", {}).get("insufficient_65_boilerplate"):
+    if (report.get("label_flags") or {}).get("insufficient_65_boilerplate"):
         questions.append("The label says studies did not include enough people over 65. Does my age change the dose?")
     fa = report.get("faers") or {}
     if fa.get("ratio") and fa["ratio"] >= 1.15:
@@ -72,7 +73,7 @@ def generate(report: dict) -> dict:
              "groups": [{k: g[k] for k in ("key", "label", "trial_share", "expected_pop", "expected_disease", "ppr_pop",
                                            "ppr_disease", "band_pop", "band_disease", "trials_missing", "trials_design_excluded")}
                         for g in report["groups"]],
-             "label_flags": report.get("label_flags", {}).get("flags", []),
+             "label_flags": (report.get("label_flags") or {}).get("flags", []),
              "faers": {k: (report.get("faers") or {}).get(k) for k in ("female_share", "baseline_female_share", "ratio")},
              "draft": base}
     prompt = ("You write a short plain-language card for a patient about whether a drug's clinical trials included people "

@@ -1,15 +1,16 @@
 """Build the researcher table: one row per drug (MeSH intervention term) across the whole harvest.
 
     python build_table.py
-No external API calls: everything comes from the harvested trials, so it runs in seconds.
+No external API calls: everything comes from the harvested trials, so it runs in seconds. Which trials count for
+a drug is decided by registry.select_trials, the same rule the report uses, so a row and its report agree.
 """
 import re
 import time
 from collections import defaultdict
 
 import db
+import registry
 import scoring
-from harmonize import PLACEBO_LIKE
 
 # skip non-drug interventions that show up as MeSH terms
 _SKIP = re.compile(r"placebo|saline|vehicle|standard of care|sodium chloride|water|vaccines?$|adjuvant|antigen|receptor|"
@@ -21,21 +22,12 @@ _SKIP = re.compile(r"placebo|saline|vehicle|standard of care|sodium chloride|wat
 def build(min_trials: int = 1) -> list[dict]:
     by_drug: dict[str, list] = defaultdict(list)
     for t in db.all_trials():
-        names = t.get("mesh_drugs") or []
-        for name in set(names):
+        for name in set(t.get("mesh_drugs") or []):
             if name and not _SKIP.search(name):
                 by_drug[name].append(t)
     rows = []
     for name, trials in by_drug.items():
-        used = []
-        for t in trials:
-            types = set()
-            for i in t.get("interventions", []):
-                if name in i["name"] or any(name in o for o in i.get("other_names", [])):
-                    types.update(i.get("arm_types", []))
-            comparator_only = bool(types) and "EXPERIMENTAL" not in types
-            if not comparator_only:
-                used.append(t)
+        used, _comparator_only = registry.select_trials(trials, name, require_mesh=True)
         if len(used) < min_trials:
             continue
         agg = scoring.aggregate(used)

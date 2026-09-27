@@ -1091,8 +1091,9 @@ function IndividualReport({
         </Button>
       </form>
       <p className="inline-note">
-        The first report for a medicine takes about 15 seconds while five public APIs are queried; later
-        requests are cached.
+        Trials and the score come from the local registry instantly. The first report for a medicine also asks
+        RxNorm, openFDA and the CDC for brands, label sentences, side-effect reports and prevalence (a few
+        seconds); those answers are stored, so later reports are instant and work offline.
       </p>
 
       {error && <ErrorState error={error} onRetry={() => loadReport()} />}
@@ -1100,6 +1101,12 @@ function IndividualReport({
         <div className="loading-state">Assembling the evidence report…</div>
       ) : report ? (
         <div className="report">
+          {report.warnings?.length ? (
+            <p className="inline-note report-warnings" role="status">
+              <Icon name="info" /> The trials and the score below are complete. Some context could not be
+              fetched this time: {report.warnings.join(" ")}
+            </p>
+          ) : null}
           <section className="report-summary">
             <div className="report-summary__score">
               <ScoreRing large score={score} />
@@ -1125,6 +1132,11 @@ function IndividualReport({
                 )}
                 {report.drug.brands?.length ? (
                   <span>Sold as {report.drug.brands.slice(0, 4).join(", ")}</span>
+                ) : null}
+                {report.drug.ingredients?.[0] &&
+                !report.drug.isCombination &&
+                report.drug.ingredients[0].toLowerCase() !== report.drug.name.toLowerCase() ? (
+                  <span>Generic name: {report.drug.ingredients[0]}</span>
                 ) : null}
                 {report.drug.approvedOn && <span>Approved {report.drug.approvedOn}</span>}
               </div>
