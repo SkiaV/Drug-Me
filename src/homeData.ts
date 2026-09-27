@@ -1,13 +1,12 @@
-import { getStats } from "./api";
+import { getMeta } from "./api";
 
 /* Numbers behind the home page.
-   - The explainer's registry-wide shares are a snapshot (2026-09-26) of the ClinicalTrials.gov harvest behind the
-     Drug Me research build: every Phase 3 trial with posted results, participant-weighted. The reference
-     population is the 2020 Census (age65 = share of adults).
-   - The banner's study count comes from this repo's own SQLite backend when it is running. */
+   - Live: /api/v1/meta gives the trial count, the refresh date, the registry-wide participant shares and the
+     2020 Census reference shares (age65 = share of adults).
+   - Snapshot: the same numbers as of 2026-09-26, shown until the API answers or when it cannot be reached. */
 
 export type HomeMeta = {
-  /** Studies behind this site; filled from the backend when it answers. */
+  /** Trials behind this site; filled from the backend when it answers. */
   trials: number | null;
   refreshed: string | null;
   registry: {
@@ -33,11 +32,12 @@ export const homeMetaSnapshot: HomeMeta = {
 
 export async function loadHomeMeta(): Promise<HomeMeta> {
   try {
-    const stats = await getStats();
+    const meta = await getMeta();
     return {
-      ...homeMetaSnapshot,
-      trials: stats.studies || null,
-      refreshed: stats.ingest?.loaded_at?.slice(0, 10) ?? null,
+      trials: meta.trials || null,
+      refreshed: meta.refreshed,
+      registry: meta.registry ?? homeMetaSnapshot.registry,
+      population: meta.population ?? homeMetaSnapshot.population,
     };
   } catch {
     return homeMetaSnapshot;

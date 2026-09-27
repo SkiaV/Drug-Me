@@ -1,0 +1,377 @@
+/* Additions on top of index.css and home.css for the data pages, using the same tokens: the drug typeahead,
+   the four-field profile, the "Who was in the trials" bars, FDA label quotes, the FAERS panel and the
+   scroll-in reveals. The header, banner and explainer styles live in home.css. */
+
+/* four profile fields (the prototype had three; ethnicity was added) */
+.profile-fields {
+  grid-template-columns: repeat(4, 1fr);
+}
+.report-builder {
+  grid-template-columns: minmax(220px, 1.1fr) 3.2fr auto;
+}
+.report-builder .profile-fields {
+  grid-template-columns: 0.55fr 0.8fr 1.5fr 1fr;
+}
+
+/* drug search with suggestions (report builder + dashboard) */
+.drug-search {
+  position: relative;
+}
+.drug-search ul {
+  position: absolute;
+  z-index: 15;
+  top: 100%;
+  left: 0;
+  right: 0;
+  margin: 4px 0 0;
+  padding: 4px 0;
+  list-style: none;
+  background: var(--paper-raised);
+  border: 1px solid var(--line);
+  box-shadow: 0 14px 30px rgba(23, 45, 42, 0.14);
+  max-height: 240px;
+  overflow: auto;
+}
+.drug-search li {
+  padding: 9px 12px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.drug-search li:hover,
+.drug-search li[aria-selected="true"] {
+  background: var(--teal-pale);
+}
+
+.error-state {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 18px 0;
+  color: var(--caution);
+  font-size: 12px;
+  border-top: 2px solid var(--caution);
+  border-bottom: 1px solid var(--line);
+}
+.error-state a,
+.error-state button {
+  color: var(--teal-dark);
+  font-weight: 700;
+  background: none;
+  border: 0;
+  padding: 0;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.coverage-bars .na {
+  color: var(--muted);
+}
+
+.metric-strip strong.small {
+  font-size: 16px;
+  letter-spacing: 0;
+}
+
+/* Who was in the trials: editorial bars */
+.rep-bars {
+  border-top: 2px solid var(--ink);
+}
+.rep-row {
+  display: grid;
+  grid-template-columns: 250px 1fr 210px;
+  align-items: center;
+  gap: 24px;
+  min-height: 62px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line);
+}
+.rep-row--mine .rep-label strong {
+  color: var(--teal-dark);
+}
+.rep-label strong {
+  display: block;
+  font-size: 12px;
+}
+.rep-label small {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 9px;
+}
+.rep-track {
+  position: relative;
+  height: 18px;
+  background: var(--line-soft);
+}
+.rep-fill {
+  position: absolute;
+  left: 0;
+  top: 4px;
+  height: 10px;
+  background: var(--teal);
+  min-width: 2px;
+  transition: width 0.9s cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+.rep-fill--missing {
+  width: 100%;
+  background: repeating-linear-gradient(45deg, var(--caution) 0 4px, transparent 4px 9px);
+  opacity: 0.7;
+}
+.rep-tick {
+  position: absolute;
+  top: 0;
+  width: 2px;
+  height: 18px;
+  background: var(--ink);
+}
+.rep-tick--disease {
+  background: var(--caution);
+}
+.rep-value {
+  font-size: 12px;
+}
+.rep-value b {
+  font-size: 14px;
+}
+.rep-value .ratio {
+  color: var(--muted);
+}
+.rep-band {
+  display: block;
+  margin-top: 4px;
+  font-size: 8px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.rep-band--adequate {
+  color: var(--positive);
+}
+.rep-band--over {
+  color: var(--teal);
+}
+.rep-band--under,
+.rep-band--very_under,
+.rep-band--not_reported {
+  color: var(--caution);
+}
+.rep-band--na_by_design {
+  color: var(--muted);
+}
+.rep-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 18px;
+  padding: 14px 0 0;
+  color: var(--muted);
+  font-size: 9px;
+}
+.rep-legend i {
+  display: inline-block;
+  width: 12px;
+  height: 8px;
+  margin-right: 6px;
+  vertical-align: 0;
+}
+.rep-legend i.tick {
+  width: 2px;
+  height: 12px;
+  vertical-align: -2px;
+}
+.rep-note {
+  margin: 12px 0 0;
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.55;
+}
+
+/* score explanation */
+.score-secondary {
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 9px;
+  text-align: center;
+}
+
+/* FDA label sentences */
+.fda-context > div.label-quotes {
+  display: grid;
+  grid-template-columns: 1fr;
+  align-items: stretch;
+  gap: 10px;
+  margin-top: 6px;
+}
+.label-quotes blockquote {
+  margin: 0;
+  padding: 12px 16px;
+  font-size: 11px;
+  line-height: 1.55;
+  color: var(--ink-soft);
+  background: rgba(255, 254, 250, 0.6);
+  border-left: 2px solid var(--teal);
+}
+.label-quotes blockquote span {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--teal);
+  font-size: 8px;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+.fda-context--stack {
+  grid-template-columns: 1fr;
+  gap: 18px;
+}
+.fda-context--stack > p {
+  margin: 0;
+}
+
+/* FAERS */
+.faers-grid {
+  display: grid;
+  grid-template-columns: 1fr 1.4fr;
+  gap: 40px;
+  align-items: start;
+}
+.faers-chart {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+.faers-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 14px;
+  font-size: 10px;
+}
+.faers-table th,
+.faers-table td {
+  padding: 6px 8px;
+  text-align: left;
+  border-bottom: 1px solid var(--line-soft);
+}
+.faers-table th {
+  color: var(--muted);
+  font-size: 8px;
+  text-transform: uppercase;
+}
+.chart-legend {
+  display: flex;
+  gap: 16px;
+  margin-top: 6px;
+  font-size: 9px;
+  color: var(--muted);
+}
+.chart-legend i {
+  display: inline-block;
+  width: 14px;
+  height: 2px;
+  margin-right: 6px;
+  vertical-align: 3px;
+}
+
+/* trial list extras */
+.trial-list dl {
+  grid-template-columns: repeat(5, 1fr);
+}
+.trial-list dd.muted {
+  color: var(--muted);
+}
+.trial-list > a > div > span.cmp {
+  color: var(--caution);
+}
+
+.questions-list {
+  margin: 22px 0 0;
+  padding-left: 18px;
+  color: var(--ink-soft);
+  font-size: 11px;
+  line-height: 1.6;
+}
+.questions-list li {
+  margin-bottom: 6px;
+}
+
+.inline-note {
+  margin: 10px 0 0;
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.5;
+}
+
+.dashboard-any {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 12px;
+  align-items: end;
+  padding: 22px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.evidence-section > .methodology-note {
+  max-width: 760px;
+  margin-bottom: 20px;
+}
+
+/* ---- Reveals: charts draw themselves when they scroll into view ---- */
+.reveal {
+  opacity: 0;
+  transform: translateY(14px);
+  transition:
+    opacity 0.6s ease,
+    transform 0.6s ease;
+}
+.reveal.is-in {
+  opacity: 1;
+  transform: none;
+}
+.coverage-bars__track i {
+  transition: width 0.9s cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+@property --score {
+  syntax: "<angle>";
+  inherits: false;
+  initial-value: 0deg;
+}
+.score-ring {
+  transition: --score 1s cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+
+@media (max-width: 980px) {
+  .profile-fields,
+  .report-builder .profile-fields {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  .rep-row {
+    grid-template-columns: 1fr;
+    gap: 8px;
+  }
+  .faers-grid {
+    grid-template-columns: 1fr;
+  }
+  .trial-list dl {
+    grid-template-columns: repeat(3, 1fr);
+  }
+}
+@media (max-width: 700px) {
+  .profile-fields,
+  .report-builder .profile-fields {
+    grid-template-columns: 1fr;
+  }
+  .dashboard-any {
+    grid-template-columns: 1fr;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .reveal,
+  .rep-fill,
+  .coverage-bars__track i,
+  .score-ring {
+    transition: none !important;
+  }
+  .reveal {
+    opacity: 1;
+    transform: none;
+  }
+}

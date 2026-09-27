@@ -2,6 +2,7 @@ node_modules/
 .venv/
 __pycache__/
 *.py[cod]
+.pytest_cache/
 dist/
 build/
 .cache/
@@ -15,6 +16,14 @@ logs/
 .claude-replay.*
 .tmp-*
 /.figma/design-context/
+
+# Flask backend: every external response is cached to disk and the raw ClinicalTrials.gov pages are large;
+# both are rebuilt by harvest.py / on first use. The harvested registry (backend/data/registry.sqlite) IS committed.
+backend/data/cache/
+backend/data/raw/
+
+# SQLite Builder (study-level store): its database and raw pages are built by ingest.py
+/Backend copy/SQLite/data/
 
 # Platform-managed agentplat state, not project source. In the
 # client-initiated single-repo workspace layout (make's `Path: "."` spec) the

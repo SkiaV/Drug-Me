@@ -1,5 +1,9 @@
 {
+  "title": "Drug Me: was this medicine tested on people like me?",
   "description": "Analyze clinical trial representativeness by sex, age, and race with dashboards, advanced searches, and personalized drug reports for informed decisions.",
+  "icons": {
+    "icon": "/drugme-icon-256.png"
+  },
   "robots": {
     "index": false
   },

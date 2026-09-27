@@ -34,9 +34,15 @@ react(),
       host: process.env.FIGMA_DEV_SERVER_HOST || '0.0.0.0',
       port: parseInt(process.env.PORT || '8443'),
       strictPort: true,
+      // The React app calls /api/v1 on its own origin; in development that is the Flask server (backend/app.py).
+      proxy: {
+        '/api': { target: process.env.API_PROXY_TARGET || 'http://127.0.0.1:5000', changeOrigin: true },
+      },
       watch: {
         ignored: [
           '**/.figma/**',
+          '**/backend/**',
+          '**/Backend copy/**',
 ],
       },
     },

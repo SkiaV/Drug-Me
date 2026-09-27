@@ -1,23 +1,32 @@
 import {
   useEffect,
   useMemo,
+  useRef,
   useState,
   type CSSProperties,
   type FormEvent,
   type ReactNode,
 } from "react";
 import {
+  ApiError,
   getDashboard,
   getDrugReport,
+  getMeta,
+  pct,
+  reportPath,
   searchDrugs,
-  type BackendStats,
+  suggest,
   type DemographicProfile,
   type DrugReport,
   type DrugSummary,
+  type Meta,
   type SearchFilters,
 } from "./api";
 import Banner from "./components/Banner";
 import Explainer from "./components/Explainer";
+import FaersPanel from "./components/FaersPanel";
+import GroupBars from "./components/GroupBars";
+import { useCountUp, useReveal } from "./hooks";
 import { homeMetaSnapshot, loadHomeMeta, type HomeMeta } from "./homeData";
 
 type Route = "home" | "dashboard" | "search" | "report";
@@ -26,16 +35,49 @@ const defaultProfile: DemographicProfile = {
   age: 67,
   sex: "Female",
   race: "Black or African American",
+  ethnicity: "All or not specified",
 };
 
 const defaultFilters: SearchFilters = {
   ...defaultProfile,
   drug: "",
   indication: "",
+  diseaseArea: "",
+  minParticipants: "500",
+  location: "",
+  sponsor: "",
+  fromDate: "",
+  toDate: "",
 };
 
-const demoReportPath =
-  "/report/fluoxetine?age=67&sex=Female&race=Black%20or%20African%20American";
+/* Reports opened from a table without a chosen demographic use a generalized profile. */
+const anyoneProfile: DemographicProfile = {
+  age: 45,
+  sex: "All or not specified",
+  race: "All or not specified",
+  ethnicity: "All or not specified",
+};
+
+/* The demo case: Ambien (zolpidem), whose dose for women was halved by the FDA in 2013. */
+const demoReportPath = reportPath("ambien", defaultProfile);
+
+const FLAG_TYPE: Record<string, string> = {
+  sex: "Sex differences",
+  older_adults: "Older adults",
+  children: "Children",
+  ancestry_genetics: "Ancestry & genetics",
+};
+
+const SECTION: Record<string, string> = {
+  dosage_and_administration: "Dosage and administration",
+  use_in_specific_populations: "Use in specific populations",
+  clinical_pharmacology: "Clinical pharmacology",
+  warnings_and_cautions: "Warnings and precautions",
+  warnings: "Warnings",
+  boxed_warning: "Boxed warning",
+  geriatric_use: "Geriatric use",
+  pediatric_use: "Pediatric use",
+};
 
 function Icon({
   name,
@@ -126,9 +168,14 @@ function routeFromPath(): Route {
 
 function useRoute() {
   const [route, setRoute] = useState<Route>(routeFromPath);
+  // Bumped on every navigation so a page can reload its state from the URL (report -> another report).
+  const [tick, setTick] = useState(0);
 
   useEffect(() => {
-    const update = () => setRoute(routeFromPath());
+    const update = () => {
+      setRoute(routeFromPath());
+      setTick((current) => current + 1);
+    };
     window.addEventListener("popstate", update);
     return () => window.removeEventListener("popstate", update);
   }, []);
@@ -136,23 +183,33 @@ function useRoute() {
   const navigate = (path: string) => {
     window.history.pushState({}, "", path);
     setRoute(routeFromPath());
+    setTick((current) => current + 1);
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
 
-  return { route, navigate };
+  return { route, navigate, tick };
 }
 
-function ScoreRing({ score, large = false }: { score: number; large?: boolean }) {
+function ScoreRing({ score, large = false }: { score: number | null; large?: boolean }) {
+  // The ring draws itself once it scrolls into view; the big report number also counts up.
+  const { ref, inView } = useReveal<HTMLDivElement>(0.3);
+  const counted = useCountUp(large && inView ? score : null, 1000);
+  const drawn = inView ? (score ?? 0) : 0;
+  const shown = large ? (counted ?? 0) : score;
+
   return (
     <div
-      aria-label={`${score} percent provisional representation score`}
+      aria-label={
+        score == null ? "No score available" : `${score} percent provisional representation score`
+      }
       className={`score-ring ${large ? "score-ring--large" : ""}`}
+      ref={ref}
       role="img"
-      style={{ "--score": `${score * 3.6}deg` } as CSSProperties}
+      style={{ "--score": `${drawn * 3.6}deg` } as CSSProperties}
     >
       <span>
-        <strong>{score}</strong>
-        <small>%</small>
+        <strong>{score == null ? "—" : shown}</strong>
+        {score != null && <small>%</small>}
       </span>
     </div>
   );
@@ -165,17 +222,22 @@ function CoverageBars({
   drug: DrugSummary;
   detailed?: boolean;
 }) {
+  const { ref, inView } = useReveal<HTMLDivElement>(0.3);
+
   return (
-    <div className={`coverage-bars ${detailed ? "coverage-bars--detailed" : ""}`}>
-      {Object.entries(drug.components).map(([label, value]) => (
-        <div className="coverage-bars__row" key={label}>
-          <span>{label}</span>
-          <div className="coverage-bars__track">
-            <i style={{ "--coverage": `${value}%` } as CSSProperties} />
+    <div className={`coverage-bars ${detailed ? "coverage-bars--detailed" : ""}`} ref={ref}>
+      {(["age", "sex", "race"] as const).map((label) => {
+        const value = drug.components[label];
+        return (
+          <div className="coverage-bars__row" key={label}>
+            <span>{label}</span>
+            <div className="coverage-bars__track">
+              <i style={{ "--coverage": `${inView ? (value ?? 0) : 0}%` } as CSSProperties} />
+            </div>
+            <b>{value == null ? <span className="na">n/a</span> : `${value}%`}</b>
           </div>
-          <b>{value}%</b>
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
@@ -183,16 +245,18 @@ function CoverageBars({
 function Button({
   children,
   className = "",
+  disabled,
   onClick,
   type = "button",
 }: {
   children: ReactNode;
   className?: string;
+  disabled?: boolean;
   onClick?: () => void;
   type?: "button" | "submit";
 }) {
   return (
-    <button className={`button ${className}`} onClick={onClick} type={type}>
+    <button className={`button ${className}`} disabled={disabled} onClick={onClick} type={type}>
       {children}
     </button>
   );
@@ -254,13 +318,19 @@ function AppShell({
             ClinicalTrials.gov API v2
           </a>
           <a href="https://open.fda.gov/apis/drug/label/" rel="noreferrer" target="_blank">
-            openFDA drug labeling (not connected)
+            openFDA labels &amp; FAERS
+          </a>
+          <a href="https://rxnav.nlm.nih.gov/" rel="noreferrer" target="_blank">
+            RxNorm
+          </a>
+          <a href="https://data.cdc.gov/resource/hksd-2xuw" rel="noreferrer" target="_blank">
+            CDC prevalence
           </a>
         </div>
         <p>
-          This research prototype describes representation in available evidence.
-          It does not assess whether a medicine is safe or appropriate for an
-          individual and is not medical advice.
+          This research prototype describes representation in available evidence. It does not assess
+          whether a medicine is safe or appropriate for an individual and is not medical advice. Nothing
+          you enter is stored.
         </p>
       </footer>
     </div>
@@ -296,10 +366,130 @@ function MethodologyNote() {
       <Icon name="info" />
       <p>
         <strong>How to read the score</strong>
-        Coverage uses protocol age eligibility, reported sex counts, and race
-        reporting. Scores are provisional while the methodology is under review.
+        Each group's share of trial participants is divided by its share of the reference population
+        (the participation-to-prevalence ratio). The score is the coverage-weighted average of those
+        ratios, capped at 1, across women, adults 65+, Black, Hispanic and Asian participants. Unreported
+        rows lower confidence, not the score.
       </p>
     </div>
+  );
+}
+
+function ErrorState({ error, onRetry }: { error: string; onRetry?: () => void }) {
+  return (
+    <div className="error-state">
+      <Icon name="info" />
+      <span>{error}</span>
+      {onRetry && (
+        <button onClick={onRetry} type="button">
+          Try again
+        </button>
+      )}
+    </div>
+  );
+}
+
+function Reveal({ children, className = "" }: { children: ReactNode; className?: string }) {
+  const { ref, inView } = useReveal<HTMLDivElement>(0.15);
+  return (
+    <div className={`reveal ${inView ? "is-in" : ""} ${className}`.trim()} ref={ref}>
+      {children}
+    </div>
+  );
+}
+
+/* Medicine input with suggestions from RxNorm (brand or generic; a brand resolves to its ingredient). */
+function DrugSearch({
+  value,
+  onChange,
+  onPick,
+  label = "Medicine (brand or generic)",
+  placeholder = "e.g. Ambien, sertraline, metformin",
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  onPick?: (value: string) => void;
+  label?: string;
+  placeholder?: string;
+}) {
+  const [items, setItems] = useState<string[]>([]);
+  const [open, setOpen] = useState(false);
+  const [active, setActive] = useState(-1);
+  const typed = useRef(false);
+
+  useEffect(() => {
+    if (!typed.current || value.trim().length < 2) {
+      setItems([]);
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      suggest(value)
+        .then((suggestions) => {
+          setItems(suggestions);
+          setOpen(true);
+          setActive(-1);
+        })
+        .catch(() => setItems([]));
+    }, 150);
+    return () => window.clearTimeout(timer);
+  }, [value]);
+
+  const pick = (suggestion: string) => {
+    typed.current = false;
+    onChange(suggestion);
+    setOpen(false);
+    onPick?.(suggestion);
+  };
+
+  return (
+    <label className="field drug-search">
+      <span>{label}</span>
+      <input
+        autoComplete="off"
+        onBlur={() => window.setTimeout(() => setOpen(false), 120)}
+        onChange={(event) => {
+          typed.current = true;
+          onChange(event.target.value);
+        }}
+        onFocus={() => {
+          if (items.length) setOpen(true);
+        }}
+        onKeyDown={(event) => {
+          if (event.key === "ArrowDown") {
+            setActive((current) => Math.min(current + 1, items.length - 1));
+            event.preventDefault();
+          } else if (event.key === "ArrowUp") {
+            setActive((current) => Math.max(current - 1, 0));
+            event.preventDefault();
+          } else if (event.key === "Enter") {
+            if (open && active >= 0) {
+              pick(items[active]);
+              event.preventDefault();
+            } else {
+              setOpen(false);
+            }
+          } else if (event.key === "Escape") {
+            setOpen(false);
+          }
+        }}
+        placeholder={placeholder}
+        value={value}
+      />
+      {open && items.length > 0 && (
+        <ul role="listbox">
+          {items.map((suggestion, index) => (
+            <li
+              aria-selected={index === active}
+              key={suggestion}
+              onMouseDown={() => pick(suggestion)}
+              role="option"
+            >
+              {suggestion}
+            </li>
+          ))}
+        </ul>
+      )}
+    </label>
   );
 }
 
@@ -314,16 +504,7 @@ function DrugTable({
   profile?: DemographicProfile;
   scoreLabel?: string;
 }) {
-  const openReport = (drug: DrugSummary) => {
-    const params = profile
-      ? `?${new URLSearchParams({
-          age: String(profile.age),
-          sex: profile.sex,
-          race: profile.race,
-        })}`
-      : "";
-    navigate(`/report/${drug.id}${params}`);
-  };
+  const openReport = (drug: DrugSummary) => navigate(reportPath(drug.id, profile ?? anyoneProfile));
 
   return (
     <div className="data-table-wrap">
@@ -343,12 +524,16 @@ function DrugTable({
                 <span className="row-index">{String(index + 1).padStart(2, "0")}</span>
                 <div>
                   <strong>{drug.name}</strong>
-                  <small>{drug.trialCount} trials analyzed</small>
+                  <small>
+                    {drug.trialCount} trials · {drug.participantCount.toLocaleString()} participants
+                  </small>
                 </div>
               </td>
               <td>
                 <strong>{drug.primaryUse}</strong>
-                <small>+{drug.otherUses.length} more uses</small>
+                <small>
+                  {drug.otherUses.length ? `+${drug.otherUses.length} more uses` : (drug.diseaseArea ?? "")}
+                </small>
               </td>
               <td>
                 <span className="dimension-label">{drug.leastResearched.dimension}</span>
@@ -404,61 +589,75 @@ function Home({ navigate }: { navigate: (path: string) => void }) {
 
 function Dashboard({ navigate }: { navigate: (path: string) => void }) {
   const [drugs, setDrugs] = useState<DrugSummary[]>([]);
-  const [stats, setStats] = useState<BackendStats | null>(null);
+  const [meta, setMeta] = useState<Meta | null>(null);
   const [query, setQuery] = useState("");
-  const [sort, setSort] = useState("score-desc");
+  const [sort, setSort] = useState("score-asc");
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [anyDrug, setAnyDrug] = useState("");
 
-  useEffect(() => {
-    getDashboard()
-      .then(({ drugs, stats }) => {
-        setDrugs(drugs);
-        setStats(stats);
+  const load = () => {
+    setLoading(true);
+    setError(null);
+    const [sortKey, order] =
+      sort === "name" ? ["name", "asc"] : ["score", sort === "score-asc" ? "asc" : "desc"];
+    Promise.all([getDashboard({ sort: sortKey, order, limit: 150 }), getMeta()])
+      .then(([rows, summary]) => {
+        setDrugs(rows);
+        setMeta(summary);
       })
-      .catch((reason: unknown) => setError(reason instanceof Error ? reason.message : "Could not load the database."))
+      .catch((reason: unknown) =>
+        setError(reason instanceof Error ? reason.message : "Could not load the evidence."),
+      )
       .finally(() => setLoading(false));
-  }, []);
+  };
+
+  useEffect(load, [sort]);
 
   const visibleDrugs = useMemo(() => {
-    const filtered = drugs.filter((drug) =>
-      `${drug.name} ${drug.primaryUse}`.toLowerCase().includes(query.toLowerCase()),
+    const needle = query.toLowerCase().trim();
+    return drugs.filter((drug) =>
+      `${drug.name} ${drug.primaryUse} ${drug.otherUses.join(" ")} ${drug.diseaseArea ?? ""}`
+        .toLowerCase()
+        .includes(needle),
     );
-    return [...filtered].sort((a, b) => {
-      if (sort === "score-asc") return a.score - b.score;
-      if (sort === "name") return a.name.localeCompare(b.name);
-      return b.score - a.score;
-    });
-  }, [drugs, query, sort]);
+  }, [drugs, query]);
+
+  const openAnyDrug = (event: FormEvent) => {
+    event.preventDefault();
+    if (anyDrug.trim()) navigate(reportPath(anyDrug.trim(), anyoneProfile));
+  };
 
   return (
     <main className="page">
       <PageIntro
         aside={<MethodologyNote />}
-        description="Explore how closely clinical-trial participants reflect the people who may use common medicines."
+        description="Explore how closely clinical-trial participants reflect the people who may use common medicines. Every row is built from the Phase 3 trials with posted results in ClinicalTrials.gov."
         eyebrow="The representation index"
         title="Who is reflected in the evidence?"
       />
 
-      <section className="metric-strip" aria-label="Evidence summary">
-        <article>
-          <small>Generic drugs reviewed</small>
-          <strong>{stats?.distinct_drugs.toLocaleString() ?? "—"}</strong>
-        </article>
-        <article>
-          <small>Trials in the evidence base</small>
-          <strong>{stats?.studies.toLocaleString() ?? "—"}</strong>
-        </article>
-        <article>
-          <small>Trials reporting race</small>
-          <strong>{stats?.studies ? `${Math.round((stats.with_race_composition / stats.studies) * 100)}%` : "—"}</strong>
-        </article>
-        <article>
-          <small>Evidence refreshed</small>
-          <strong>{stats?.ingest?.loaded_at ? new Date(stats.ingest.loaded_at).toLocaleDateString() : "Not reported"}</strong>
-          <span>SQLite database</span>
-        </article>
-      </section>
+      <Reveal>
+        <section className="metric-strip" aria-label="Evidence summary">
+          <article>
+            <small>Generic drugs reviewed</small>
+            <strong>{meta ? meta.drugsReviewed.toLocaleString() : "…"}</strong>
+          </article>
+          <article>
+            <small>Trials in the evidence base</small>
+            <strong>{meta ? meta.trials.toLocaleString() : "…"}</strong>
+          </article>
+          <article>
+            <small>Average coverage (≥2 trials, ≥500 people)</small>
+            <strong>{meta?.overallCoverage != null ? `${meta.overallCoverage}%` : "—"}</strong>
+          </article>
+          <article>
+            <small>Evidence refreshed</small>
+            <strong>{meta?.refreshed ?? "not loaded"}</strong>
+            {meta?.sampleData ? <span>Sample dataset</span> : <span>Live harvest</span>}
+          </article>
+        </section>
+      </Reveal>
 
       <section className="evidence-section" aria-labelledby="dashboard-results">
         <div className="section-heading">
@@ -473,10 +672,10 @@ function Dashboard({ navigate }: { navigate: (path: string) => void }) {
         <div className="table-controls">
           <label className="search-field">
             <Icon name="search" />
-            <span className="sr-only">Search generic medicines</span>
+            <span className="sr-only">Filter medicines</span>
             <input
               onChange={(event) => setQuery(event.target.value)}
-              placeholder="Search a generic drug or use"
+              placeholder="Filter by drug, use or disease area"
               type="search"
               value={query}
             />
@@ -491,26 +690,39 @@ function Dashboard({ navigate }: { navigate: (path: string) => void }) {
           </label>
         </div>
         {error ? (
-          <div className="empty-state"><strong>Could not load trial data.</strong><span>{error}</span></div>
+          <ErrorState error={error} onRetry={load} />
         ) : loading ? (
           <div className="loading-state">Reviewing the evidence…</div>
         ) : visibleDrugs.length ? (
           <DrugTable drugs={visibleDrugs} navigate={navigate} />
         ) : (
           <div className="empty-state">
-            <strong>No medicines match this search.</strong>
-            <span>Try a generic drug name or a broader use.</span>
+            <strong>No medicines match this filter.</strong>
+            <span>
+              Try a generic drug name or a broader use, or open a report for any medicine below.
+            </span>
           </div>
         )}
         <div className="table-caption">
           <p>
             <Icon name="info" />
-            Scores describe the completeness of demographic evidence—not drug
-            safety, efficacy, or treatment suitability. Dashboard summaries use
-            the first 200 studies returned by the API.
+            Scores describe the completeness of demographic evidence—not drug safety, efficacy, or
+            treatment suitability. Rows need at least 2 trials and 500 participants.
           </p>
-          <span>{visibleDrugs.length} medicines shown</span>
+          <span>
+            {visibleDrugs.length} of {drugs.length} records shown
+          </span>
         </div>
+        <form className="dashboard-any" onSubmit={openAnyDrug}>
+          <DrugSearch
+            label="Not in the list? Open a report for any medicine"
+            onChange={setAnyDrug}
+            value={anyDrug}
+          />
+          <Button className="button--primary" type="submit">
+            Open report <Icon name="arrow" />
+          </Button>
+        </form>
       </section>
     </main>
   );
@@ -547,7 +759,6 @@ function ProfileFields({
               sex: event.target.value as DemographicProfile["sex"],
             })
           }
-          required
           value={values.sex}
         >
           <option>Female</option>
@@ -564,7 +775,6 @@ function ProfileFields({
               race: event.target.value as DemographicProfile["race"],
             })
           }
-          required
           value={values.race}
         >
           <option>American Indian or Alaska Native</option>
@@ -576,6 +786,22 @@ function ProfileFields({
           <option>All or not specified</option>
         </select>
       </label>
+      <label className="field">
+        <span>Ethnicity</span>
+        <select
+          onChange={(event) =>
+            onChange({
+              ...values,
+              ethnicity: event.target.value as DemographicProfile["ethnicity"],
+            })
+          }
+          value={values.ethnicity}
+        >
+          <option>Hispanic or Latino</option>
+          <option>Not Hispanic or Latino</option>
+          <option>All or not specified</option>
+        </select>
+      </label>
     </div>
   );
 }
@@ -583,8 +809,15 @@ function ProfileFields({
 function AdvancedSearch({ navigate }: { navigate: (path: string) => void }) {
   const [filters, setFilters] = useState<SearchFilters>(defaultFilters);
   const [results, setResults] = useState<DrugSummary[] | null>(null);
+  const [areas, setAreas] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    getMeta()
+      .then((meta) => setAreas(meta.diseaseAreas))
+      .catch(() => {});
+  }, []);
 
   const update = (key: keyof SearchFilters, value: string | number) =>
     setFilters((current) => ({ ...current, [key]: value }));
@@ -592,12 +825,11 @@ function AdvancedSearch({ navigate }: { navigate: (path: string) => void }) {
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     setLoading(true);
-    setError("");
+    setError(null);
     try {
       setResults(await searchDrugs(filters));
     } catch (reason) {
-      setResults([]);
-      setError(reason instanceof Error ? reason.message : "Could not search studies.");
+      setError(reason instanceof Error ? reason.message : "Could not search the evidence.");
     } finally {
       setLoading(false);
     }
@@ -610,7 +842,7 @@ function AdvancedSearch({ navigate }: { navigate: (path: string) => void }) {
   return (
     <main className="page">
       <PageIntro
-        description="Focus the evidence search on a demographic profile, then narrow by medicine or condition."
+        description="Focus the representation score on a demographic profile, then narrow the evidence by medicine, use, disease area, sponsor, place, or study years."
         eyebrow="Advanced evidence search"
         title="Ask a more specific question."
       />
@@ -621,7 +853,7 @@ function AdvancedSearch({ navigate }: { navigate: (path: string) => void }) {
             <span>01</span>
             <div>
               <h2>Demographic profile</h2>
-              <p>Choose a demographic profile to filter the available studies.</p>
+              <p>Required. Scores are recalculated for these groups only.</p>
             </div>
           </div>
           <ProfileFields
@@ -635,7 +867,7 @@ function AdvancedSearch({ navigate }: { navigate: (path: string) => void }) {
             <span>02</span>
             <div>
               <h2>Clinical filters</h2>
-              <p>Optionally narrow by medicine or condition.</p>
+              <p>Optional. The evidence base is every Phase 3 trial with posted results.</p>
             </div>
           </div>
           <div className="clinical-fields">
@@ -643,7 +875,7 @@ function AdvancedSearch({ navigate }: { navigate: (path: string) => void }) {
               <span>Generic drug name</span>
               <input
                 onChange={(event) => update("drug", event.target.value)}
-                placeholder="e.g. fluoxetine"
+                placeholder="e.g. sertraline"
                 value={filters.drug}
               />
             </label>
@@ -655,30 +887,90 @@ function AdvancedSearch({ navigate }: { navigate: (path: string) => void }) {
                 value={filters.indication}
               />
             </label>
+            <label className="field">
+              <span>Disease area</span>
+              <select
+                onChange={(event) => update("diseaseArea", event.target.value)}
+                value={filters.diseaseArea}
+              >
+                <option value="">All disease areas</option>
+                {areas.map((area) => (
+                  <option key={area} value={area}>
+                    {area}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="field">
+              <span>Minimum participants pooled</span>
+              <select
+                onChange={(event) => update("minParticipants", event.target.value)}
+                value={filters.minParticipants}
+              >
+                <option value="100">100</option>
+                <option value="500">500</option>
+                <option value="2000">2,000</option>
+                <option value="10000">10,000</option>
+              </select>
+            </label>
+            <label className="field">
+              <span>Location (country)</span>
+              <input
+                onChange={(event) => update("location", event.target.value)}
+                placeholder="e.g. United States, Japan"
+                value={filters.location}
+              />
+            </label>
+            <label className="field">
+              <span>Sponsor</span>
+              <input
+                onChange={(event) => update("sponsor", event.target.value)}
+                placeholder="Organization name"
+                value={filters.sponsor}
+              />
+            </label>
+            <label className="field">
+              <span>Study start from</span>
+              <input
+                onChange={(event) => update("fromDate", event.target.value)}
+                type="date"
+                value={filters.fromDate}
+              />
+            </label>
+            <label className="field">
+              <span>Study start to</span>
+              <input
+                onChange={(event) => update("toDate", event.target.value)}
+                type="date"
+                value={filters.toDate}
+              />
+            </label>
           </div>
         </section>
 
         <div className="form-actions">
           <p>
             <Icon name="info" />
-            No personal information is saved. Search values are used only for
-            this session.
+            No personal information is saved. Search values are used only for this request.
           </p>
-          <Button className="button--primary" type="submit">
+          <Button className="button--primary" disabled={loading} type="submit">
             {loading ? "Calculating…" : "Calculate representation"} <Icon name="arrow" />
           </Button>
         </div>
       </form>
 
+      {error && <ErrorState error={error} />}
       {results && (
         <section className="evidence-section search-results" id="search-results">
-          {error && <div className="empty-state"><strong>Search failed.</strong><span>{error}</span></div>}
           <div className="section-heading">
             <div>
-              <p className="eyebrow">Demographic-specific results</p>
+              <p className="eyebrow">Demographic-specific results · least covered first</p>
               <h2>
                 Evidence for age {filters.age}, {filters.sex.toLowerCase()},{" "}
                 {filters.race.toLowerCase()}
+                {filters.ethnicity !== "All or not specified"
+                  ? `, ${filters.ethnicity.toLowerCase()}`
+                  : ""}
               </h2>
             </div>
             <span className="result-count">{results.length} medicines</span>
@@ -703,7 +995,7 @@ function AdvancedSearch({ navigate }: { navigate: (path: string) => void }) {
 }
 
 function readReportState() {
-  const drugId = window.location.pathname.split("/")[2] || "fluoxetine";
+  const drugId = decodeURIComponent(window.location.pathname.split("/")[2] || "ambien");
   const params = new URLSearchParams(window.location.search);
   return {
     drugId,
@@ -711,52 +1003,77 @@ function readReportState() {
       age: Number(params.get("age")) || defaultProfile.age,
       sex: (params.get("sex") as DemographicProfile["sex"]) || defaultProfile.sex,
       race: (params.get("race") as DemographicProfile["race"]) || defaultProfile.race,
+      ethnicity:
+        (params.get("ethnicity") as DemographicProfile["ethnicity"]) || defaultProfile.ethnicity,
     },
   };
 }
 
-function IndividualReport({ navigate }: { navigate: (path: string) => void }) {
+function IndividualReport({
+  navigate,
+  tick,
+}: {
+  navigate: (path: string) => void;
+  tick: number;
+}) {
   const initial = readReportState();
-  const [drugId, setDrugId] = useState(initial.drugId);
+  const [drugName, setDrugName] = useState(initial.drugId);
   const [profile, setProfile] = useState<DemographicProfile>(initial.profile);
-  const [availableDrugs, setAvailableDrugs] = useState<DrugSummary[]>([]);
   const [report, setReport] = useState<DrugReport | null>(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
+  const [error, setError] = useState<string | null>(null);
 
-  const loadReport = async (nextDrug = drugId, nextProfile = profile) => {
+  const loadReport = async (nextDrug = drugName, nextProfile = profile) => {
+    if (!nextDrug.trim()) return;
     setLoading(true);
-    setError("");
+    setError(null);
     try {
-      const data = await getDrugReport(nextDrug, nextProfile);
+      const data = await getDrugReport(nextDrug.trim(), nextProfile);
       setReport(data);
-      const params = new URLSearchParams({
-        age: String(nextProfile.age),
-        sex: nextProfile.sex,
-        race: nextProfile.race,
-      });
-      const nextUrl = `/report/${nextDrug}?${params}`;
-      if (`${window.location.pathname}${window.location.search}` !== nextUrl) {
-        window.history.replaceState({}, "", nextUrl);
-      }
+      window.history.replaceState({}, "", reportPath(data.drug.id, nextProfile));
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Could not load this report.");
+      setError(reason instanceof ApiError ? reason.message : "Could not build the report.");
+      setReport(null);
     } finally {
       setLoading(false);
     }
   };
 
+  // Re-read the URL on every navigation, so the nav button and the browser's back/forward reload the report.
   useEffect(() => {
-    getDashboard()
-      .then(({ drugs }) => setAvailableDrugs(drugs))
-      .catch((reason: unknown) => setError(reason instanceof Error ? reason.message : "Could not load medicines."));
-    loadReport(initial.drugId, initial.profile);
-  }, []);
+    const state = readReportState();
+    setDrugName(state.drugId);
+    setProfile(state.profile);
+    loadReport(state.drugId, state.profile);
+  }, [tick]);
 
   const submit = (event: FormEvent) => {
     event.preventDefault();
     loadReport();
   };
+
+  const exportSummary = () => {
+    if (!report) return;
+    const blob = new Blob([JSON.stringify(report, null, 2)], { type: "application/json" });
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = `${report.drug.id}-representation-report.json`;
+    link.click();
+  };
+
+  const details = report?.details;
+  const score = report?.personalizedScore ?? null;
+  const headline = !report
+    ? ""
+    : !report.scoreable
+      ? "Too little trial data to score this profile."
+      : score == null
+        ? "Your groups were not reported in these trials."
+        : score >= 75
+          ? "The evidence is comparatively representative."
+          : score >= 55
+            ? "The evidence has meaningful coverage gaps."
+            : "The evidence has substantial coverage gaps.";
 
   return (
     <main className="page report-page">
@@ -767,146 +1084,303 @@ function IndividualReport({ navigate }: { navigate: (path: string) => void }) {
       />
 
       <form className="report-builder" onSubmit={submit}>
-        <label className="field">
-          <span>Generic drug</span>
-          <select onChange={(event) => setDrugId(event.target.value)} value={drugId}>
-            {!availableDrugs.some((drug) => drug.id === drugId) && report && (
-              <option value={drugId}>{report.drug.name}</option>
-            )}
-            {availableDrugs
-              .slice()
-              .sort((a, b) => a.name.localeCompare(b.name))
-              .map((drug) => <option key={drug.id} value={drug.id}>{drug.name}</option>)}
-          </select>
-        </label>
+        <DrugSearch onChange={setDrugName} onPick={(name) => loadReport(name)} value={drugName} />
         <ProfileFields onChange={setProfile} values={profile} />
-        <Button className="button--primary" type="submit">
-          Update report <Icon name="arrow" />
+        <Button className="button--primary" disabled={loading} type="submit">
+          {loading ? "Assembling…" : "Update report"} <Icon name="arrow" />
         </Button>
       </form>
+      <p className="inline-note">
+        The first report for a medicine takes about 15 seconds while five public APIs are queried; later
+        requests are cached.
+      </p>
 
-      {error && <div className="empty-state"><strong>Report unavailable.</strong><span>{error}</span></div>}
+      {error && <ErrorState error={error} onRetry={() => loadReport()} />}
       {loading ? (
         <div className="loading-state">Assembling the evidence report…</div>
       ) : report ? (
         <div className="report">
           <section className="report-summary">
             <div className="report-summary__score">
-              <ScoreRing large score={report.personalizedScore} />
+              <ScoreRing large score={score} />
               <span>Provisional profile score</span>
+              {report.diseaseScore != null &&
+                report.populationScore != null &&
+                report.diseaseScore !== report.populationScore && (
+                  <div className="score-secondary">
+                    vs. people with this condition · vs. US population: <b>{report.populationScore}%</b>
+                  </div>
+                )}
             </div>
             <div className="report-summary__copy">
               <p className="eyebrow">Evidence interpretation</p>
-              <h2>
-                {report.personalizedScore >= 75
-                  ? "The evidence is comparatively representative."
-                  : report.personalizedScore >= 55
-                    ? "The evidence has meaningful coverage gaps."
-                    : "The evidence has substantial coverage gaps."}
-              </h2>
+              <h2>{headline}</h2>
               <p>{report.summary}</p>
               <div className="profile-chips">
                 <span>Age {report.profile.age}</span>
                 <span>{report.profile.sex}</span>
                 <span>{report.profile.race}</span>
+                {report.profile.ethnicity !== "All or not specified" && (
+                  <span>{report.profile.ethnicity}</span>
+                )}
+                {report.drug.brands?.length ? (
+                  <span>Sold as {report.drug.brands.slice(0, 4).join(", ")}</span>
+                ) : null}
+                {report.drug.approvedOn && <span>Approved {report.drug.approvedOn}</span>}
               </div>
+              {report.drug.isCombination && (
+                <p className="inline-note">
+                  Combination product ({report.drug.ingredients?.join(" + ")}). Showing trials for{" "}
+                  {report.drug.name.toLowerCase()}; search the other ingredient separately.
+                </p>
+              )}
             </div>
-            <Button className="button--outline">
+            <Button className="button--outline" onClick={exportSummary}>
               <Icon name="download" /> Export summary
             </Button>
           </section>
 
-          <section className="report-grid">
-            <article className="report-card report-card--coverage">
-              <p className="eyebrow">Coverage components</p>
-              <h3>Where the evidence is strongest</h3>
-              <CoverageBars detailed drug={report.drug} />
-              <p className="card-note">
-                Component scores reflect the generalized evidence base. The
-                profile score applies demographic-specific adjustments.
-              </p>
-            </article>
-            <article className="report-card">
-              <p className="eyebrow">What the evidence shows</p>
-              <h3>Strengths and limitations</h3>
-              <div className="findings-list findings-list--positive">
-                {report.strengths.map((item) => (
-                  <p key={item}>
-                    <Icon name="check" /> {item}
-                  </p>
-                ))}
+          <Reveal>
+            <section className="report-grid">
+              <article className="report-card report-card--coverage">
+                <p className="eyebrow">Coverage components</p>
+                <h3>Where the evidence is strongest</h3>
+                <CoverageBars detailed drug={report.drug} />
+                <p className="card-note">
+                  Component scores use the participation-to-prevalence ratio of each group, weighted by how
+                  many participants came from trials that reported the row. "n/a" means no trial reported
+                  that dimension.
+                  {details && (
+                    <>
+                      {" "}
+                      Based on {details.evidence.trials} trials and{" "}
+                      {details.evidence.participants.toLocaleString()} participants
+                      {details.evidence.comparator_only
+                        ? `; ${details.evidence.comparator_only} comparator-only trial(s) excluded`
+                        : ""}
+                      .
+                    </>
+                  )}
+                </p>
+              </article>
+              <article className="report-card">
+                <p className="eyebrow">What the evidence shows</p>
+                <h3>Strengths and limitations</h3>
+                <div className="findings-list findings-list--positive">
+                  {report.strengths.map((item) => (
+                    <p key={item}>
+                      <Icon name="check" /> {item}
+                    </p>
+                  ))}
+                </div>
+                <div className="findings-list findings-list--caution">
+                  {report.gaps.map((item) => (
+                    <p key={item}>
+                      <Icon name="info" /> {item}
+                    </p>
+                  ))}
+                </div>
+                {report.questions?.length ? (
+                  <>
+                    <p className="eyebrow" style={{ marginTop: 24 }}>
+                      Questions for your doctor or pharmacist
+                    </p>
+                    <ol className="questions-list">
+                      {report.questions.map((question) => (
+                        <li key={question}>{question}</li>
+                      ))}
+                    </ol>
+                  </>
+                ) : null}
+              </article>
+            </section>
+          </Reveal>
+
+          {details && details.groups.length > 0 && (
+            <section className="report-section" aria-labelledby="who-was-in">
+              <div className="section-heading">
+                <div>
+                  <p className="eyebrow">Enrollment by group</p>
+                  <h2 id="who-was-in">Who was in the trials</h2>
+                </div>
+                <span className="result-count">
+                  {details.evidence.participants.toLocaleString()} participants
+                </span>
               </div>
-              <div className="findings-list findings-list--caution">
-                {report.gaps.map((item) => (
-                  <p key={item}>
-                    <Icon name="info" /> {item}
-                  </p>
-                ))}
-              </div>
-            </article>
-          </section>
+              <GroupBars
+                details={details}
+                profileGroups={report.profile.groups ?? []}
+                trials={details.evidence.trials}
+              />
+            </section>
+          )}
 
           <section className="report-section" aria-labelledby="trial-evidence">
             <div className="section-heading">
               <div>
                 <p className="eyebrow">Supporting evidence</p>
-                <h2 id="trial-evidence">Relevant clinical trials</h2>
+                <h2 id="trial-evidence">Trials behind this report</h2>
               </div>
-              <span className="result-count">{report.drug.trialCount} total trials</span>
+              <span className="result-count">{report.evidence.length} trials with posted results</span>
             </div>
-            <div className="trial-list">
-              {report.evidence.map((item) => (
-                <a href={item.sourceUrl} key={item.id} rel="noreferrer" target="_blank">
-                  <div>
-                    <span>{item.id}</span>
-                    <strong>{item.title}</strong>
-                  </div>
-                  <dl>
+            {report.evidence.length === 0 ? (
+              <div className="empty-state">
+                <strong>No Phase 3 trials with posted demographic results.</strong>
+                <span>
+                  {details?.evidence.note ??
+                    "ClinicalTrials.gov results reporting began in 2008; older approvals are not visible here."}
+                </span>
+              </div>
+            ) : (
+              <div className="trial-list">
+                {report.evidence.map((item) => (
+                  <a href={item.sourceUrl} key={item.id} rel="noreferrer" target="_blank">
                     <div>
-                      <dt>Study type</dt>
-                      <dd>{item.phase}</dd>
+                      <span className={item.match === "Comparator only" ? "cmp" : ""}>
+                        {item.id} · {item.match}
+                      </span>
+                      <strong>{item.title}</strong>
                     </div>
-                    <div>
-                      <dt>Status</dt>
-                      <dd>{item.status}</dd>
-                    </div>
-                    <div>
-                      <dt>Enrollment</dt>
-                      <dd>{item.enrollment.toLocaleString()}</dd>
-                    </div>
-                    <div>
-                      <dt>Profile match</dt>
-                      <dd>{item.match}</dd>
-                    </div>
-                  </dl>
-                  <Icon name="arrow" />
-                </a>
-              ))}
-            </div>
+                    <dl>
+                      <div>
+                        <dt>Years · sponsor</dt>
+                        <dd>
+                          {item.years?.[0] ?? "?"}–{item.years?.[1] ?? "?"} · {item.sponsorClass ?? "?"}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>Enrollment</dt>
+                        <dd>
+                          {item.enrollment.toLocaleString()}
+                          {item.sitesTotal ? ` · ${item.sitesUs}/${item.sitesTotal} US sites` : ""}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>Ages allowed</dt>
+                        <dd>
+                          {item.agesAllowed}
+                          {item.sexAllowed && item.sexAllowed !== "ALL"
+                            ? ` · ${item.sexAllowed.toLowerCase()} only`
+                            : ""}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>Women · 65+</dt>
+                        <dd>
+                          {pct(item.femaleShare)} ·{" "}
+                          {item.age65Share != null ? (
+                            pct(item.age65Share)
+                          ) : item.meanAge != null ? (
+                            <span className="muted">mean age {item.meanAge}</span>
+                          ) : (
+                            "—"
+                          )}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>Race table</dt>
+                        <dd className={item.raceReported ? "" : "muted"}>
+                          {item.raceReported ? item.raceTitle : "not reported"}
+                        </dd>
+                      </div>
+                    </dl>
+                    <Icon name="arrow" />
+                  </a>
+                ))}
+              </div>
+            )}
           </section>
 
-          <section className="fda-context">
-            <div>
-              <span className="source-mark">FDA</span>
+          <Reveal>
+            <section className="fda-context fda-context--stack">
               <div>
-                <p className="eyebrow">Labeling context</p>
-                <h2>{report.fdaContext.indication}</h2>
+                <span className="source-mark">FDA</span>
+                <div>
+                  <p className="eyebrow">
+                    Labeling context
+                    {report.fdaContext.labelUpdated
+                      ? ` · label effective ${report.fdaContext.labelUpdated}`
+                      : ""}
+                  </p>
+                  <h2>{report.fdaContext.indication}</h2>
+                </div>
               </div>
-            </div>
-            <p>{report.fdaContext.note}</p>
-            <a href={report.fdaContext.sourceUrl} rel="noreferrer" target="_blank">
-              View openFDA source <Icon name="arrow" />
-            </a>
-          </section>
+              {report.fdaContext.insufficient65 && (
+                <p>
+                  <strong>
+                    The label states that clinical studies did not include sufficient numbers of subjects
+                    aged 65 and over.
+                  </strong>
+                </p>
+              )}
+              {report.fdaContext.flags?.length ? (
+                <div className="label-quotes">
+                  {report.fdaContext.flags.map((flag, index) => (
+                    <blockquote key={index}>
+                      <span>
+                        {FLAG_TYPE[flag.type] ?? flag.type} · {SECTION[flag.section] ?? flag.section}
+                      </span>
+                      “{flag.quote}”
+                    </blockquote>
+                  ))}
+                </div>
+              ) : (
+                <p>{report.fdaContext.note}</p>
+              )}
+              <a href={report.fdaContext.sourceUrl} rel="noreferrer" target="_blank">
+                View the full label <Icon name="arrow" />
+              </a>
+            </section>
+          </Reveal>
+
+          {details?.faers && details.faers.reports > 0 && (
+            <section className="report-section" aria-labelledby="faers">
+              <div className="section-heading">
+                <div>
+                  <p className="eyebrow">After approval</p>
+                  <h2 id="faers">Side-effect reports by sex</h2>
+                </div>
+                <span className="result-count">openFDA FAERS</span>
+              </div>
+              <FaersPanel faers={details.faers} />
+            </section>
+          )}
+
+          {details && (
+            <section className="report-section">
+              <p className="eyebrow">Method and limits</p>
+              <div className="findings-list findings-list--caution">
+                <p>
+                  <Icon name="info" /> {details.method.metric}
+                </p>
+                <p>
+                  <Icon name="info" /> {details.method.score}
+                </p>
+                {details.method.limits.map((limit) => (
+                  <p key={limit}>
+                    <Icon name="info" /> {limit}
+                  </p>
+                ))}
+                <p>
+                  <Icon name="info" /> Population denominator: {details.denominators.population}. Trials
+                  from{" "}
+                  {details.evidence.source === "harvest"
+                    ? "the local registry harvest"
+                    : "a live ClinicalTrials.gov query"}
+                  .
+                </p>
+              </div>
+            </section>
+          )}
 
           <section className="report-disclaimer">
             <Icon name="book" size={24} />
             <div>
               <strong>Use this report as a starting point, not a clinical conclusion.</strong>
               <p>
-                Trial representation is one part of understanding medical
-                evidence. Eligibility criteria, study design, dosage, outcomes,
-                and individual health factors also matter.
+                Trial representation is one part of understanding medical evidence. Eligibility criteria,
+                study design, dosage, outcomes, and individual health factors also matter. Take the
+                questions above to a clinician.
               </p>
             </div>
             <Button className="button--text" onClick={() => navigate("/advanced-search")}>
@@ -920,14 +1394,14 @@ function IndividualReport({ navigate }: { navigate: (path: string) => void }) {
 }
 
 export default function App() {
-  const { route, navigate } = useRoute();
+  const { route, navigate, tick } = useRoute();
 
   return (
     <AppShell navigate={navigate} route={route}>
       {route === "home" && <Home navigate={navigate} />}
       {route === "dashboard" && <Dashboard navigate={navigate} />}
       {route === "search" && <AdvancedSearch navigate={navigate} />}
-      {route === "report" && <IndividualReport navigate={navigate} />}
+      {route === "report" && <IndividualReport navigate={navigate} tick={tick} />}
     </AppShell>
   );
 }

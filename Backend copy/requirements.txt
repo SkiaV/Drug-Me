@@ -2,5 +2,4 @@ python-dotenv
 flask>=3.0
 flask-cors>=4.0
 requests
-jsonify
 pytest

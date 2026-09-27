@@ -1,17 +1,40 @@
+/* Frontend models and requests to the Flask API (backend/app.py, /api/v1).
+
+   Same-origin by default: in production Flask serves the built app and the API from one URL; in development
+   vite.config.ts proxies /api to Flask. Set VITE_API_BASE_URL when Flask is hosted elsewhere. There is no mock
+   fallback; API errors appear in the relevant page. */
+
 export type CoverageTier = "Limited" | "Developing" | "Strong";
+
+export type Components = { age: number | null; sex: number | null; race: number | null };
+
+export type GroupCell = { share: number | null; ppr: number | null; band: string; missingTrials: number };
 
 export type DrugSummary = {
   id: string;
   name: string;
   primaryUse: string;
   otherUses: string[];
-  leastResearched: { dimension: "Age" | "Sex" | "Race"; group: string };
-  score: number;
+  diseaseArea?: string | null;
+  leastResearched: { dimension: "Age" | "Sex" | "Race" | "Ethnicity"; group: string };
+  score: number | null;
   tier: CoverageTier;
-  components: { age: number; sex: number; race: number };
+  components: Components;
   trialCount: number;
   participantCount: number;
-  updatedAt: string;
+  updatedAt: string | null;
+  // extras the Flask API adds on top of the prototype's shape
+  groups?: Record<string, GroupCell>;
+  years?: (number | null)[];
+  raceMissingShare?: number;
+  designExcluded65Share?: number;
+  usSiteShare?: number | null;
+  brands?: string[];
+  drugClass?: string | null;
+  approvedOn?: string | null;
+  isCombination?: boolean;
+  ingredients?: string[];
+  matchedName?: string;
 };
 
 export type DemographicProfile = {
@@ -25,19 +48,19 @@ export type DemographicProfile = {
     | "Native Hawaiian or Pacific Islander"
     | "White"
     | "All or not specified";
+  ethnicity: "Hispanic or Latino" | "Not Hispanic or Latino" | "All or not specified";
 };
 
-export type SearchFilters = DemographicProfile & { drug: string; indication: string };
-
-export type BackendStats = {
-  studies: number;
-  participants: number;
-  with_race_composition: number;
-  distinct_drugs: number;
-  ingest: { loaded_at?: string } | null;
+export type SearchFilters = DemographicProfile & {
+  drug: string;
+  indication: string;
+  diseaseArea: string;
+  minParticipants: string;
+  location: string;
+  sponsor: string;
+  fromDate: string;
+  toDate: string;
 };
-
-export type DashboardData = { drugs: DrugSummary[]; stats: BackendStats };
 
 export type EvidenceItem = {
   id: string;
@@ -47,244 +70,210 @@ export type EvidenceItem = {
   enrollment: number;
   match: string;
   sourceUrl: string;
+  years?: (number | null)[];
+  sponsor?: string | null;
+  sponsorClass?: string | null;
+  sitesTotal?: number;
+  sitesUs?: number;
+  agesAllowed?: string;
+  sexAllowed?: string;
+  femaleShare?: number | null;
+  age65Share?: number | null;
+  meanAge?: number | null;
+  raceReported?: boolean;
+  raceTitle?: string | null;
+};
+
+/** One demographic group of one report: its share of pooled participants against two expected shares. */
+export type Group = {
+  key: string;
+  label: string;
+  dimension: string;
+  count: number | null;
+  trial_share: number | null;
+  expected_pop: number;
+  expected_disease: number | null;
+  ppr_pop: number | null;
+  ppr_disease: number | null;
+  band_pop: string;
+  band_disease: string | null;
+  coverage: number;
+  trials_reporting: number;
+  trials_missing: number;
+  trials_design_excluded: number;
+};
+
+export type Faers = {
+  reports: number;
+  female: number;
+  male: number;
+  female_share: number | null;
+  baseline_female_share: number | null;
+  ratio: number | null;
+  by_year: { year: number; female: number; male: number }[];
+  reactions_skew_female: { reaction: string; female: number; male: number; ratio: number }[];
+  note: string;
+};
+
+export type ReportDetails = {
+  groups: Group[];
+  denominators: {
+    population: string;
+    disease: { question: string; year: string; proxy: boolean; source: string } | null;
+  };
+  evidence: {
+    trials: number;
+    participants: number;
+    years: (number | null)[];
+    source: string;
+    found: number;
+    comparator_only: number;
+    missing: { race: number; ethnicity: number; age_categorical: number; sex: number };
+    note: string | null;
+    us_site_share: number | null;
+    industry_share: number | null;
+    mean_age: number | null;
+  };
+  faers: Faers | null;
+  method: { metric: string; score: string; limits: string[] };
+  approval: { date: string; application: string } | null;
 };
 
 export type DrugReport = {
   drug: DrugSummary;
-  profile: DemographicProfile;
-  personalizedScore: number;
+  profile: DemographicProfile & { groups?: string[] };
+  personalizedScore: number | null;
+  populationScore?: number | null;
+  diseaseScore?: number | null;
+  scoreable?: boolean;
   summary: string;
+  questions?: string[];
   strengths: string[];
   gaps: string[];
-  fdaContext: { indication: string; labelUpdated: string; note: string; sourceUrl: string };
+  fdaContext: {
+    indication: string;
+    labelUpdated: string | null;
+    brand?: string | null;
+    note: string;
+    flags?: { type: string; section: string; quote: string }[];
+    insufficient65?: boolean;
+    sourceUrl: string;
+  };
   evidence: EvidenceItem[];
+  details?: ReportDetails;
 };
 
-type Study = {
-  nct_id: string;
-  drug: string;
-  drug_mesh: string;
-  condition: string;
-  sex: "M" | "F" | "MF";
-  age_lower: number | null;
-  age_upper: number | null;
-  female_count: number | null;
-  male_count: number | null;
-  participants: number;
-  race_reported: 0 | 1;
-  source_url: string;
-  race_composition: { demographic: string; count: number; category: string; dimension: "race" | "ethnicity" }[];
-};
-
-type StudyList = { total: number; studies: Study[] };
-type Aggregate = {
-  studies: number;
-  participants: number;
-  studies_reporting_race: number;
-  sex: { female: number | null; male: number | null };
-  age_range: [number | null, number | null];
-  race_composition: { dimension: "race" | "ethnicity"; category: string; count: number; studies: number }[];
+export type Meta = {
+  drugsReviewed: number;
+  trials: number;
+  overallCoverage: number | null;
+  refreshed: string | null;
+  diseaseAreas: string[];
+  sampleData: boolean;
+  /** 2020 Census shares used as the reference population (age65 = share of adults). */
+  population?: Record<string, number>;
+  /** Participant-weighted shares across every harvested trial, for the home-page explainer. */
+  registry?: {
+    trials: number;
+    participants: number;
+    shares: Record<string, number | null>;
+    notReported: Record<string, number>;
+    meanAge: number | null;
+  } | null;
 };
 
 const apiBase = (
-  (import.meta as ImportMeta & { env: { VITE_API_BASE_URL?: string } }).env.VITE_API_BASE_URL ||
-  "http://127.0.0.1:5001"
+  (import.meta as ImportMeta & { env: { VITE_API_BASE_URL?: string } }).env.VITE_API_BASE_URL ?? ""
 ).replace(/\/$/, "");
 
+export class ApiError extends Error {
+  code: string;
+
+  constructor(code: string, message: string) {
+    super(message);
+    this.code = code;
+  }
+}
+
 async function request<T>(path: string): Promise<T> {
-  const response = await fetch(`${apiBase}${path}`, { headers: { Accept: "application/json" } });
+  let response: Response;
+  try {
+    response = await fetch(`${apiBase}/api/v1${path}`, { headers: { Accept: "application/json" } });
+  } catch {
+    throw new ApiError("network", "The API is not reachable. Start the Flask server: python backend/app.py");
+  }
   if (!response.ok) {
-    const body = await response.json().catch(() => null);
-    throw new Error(body?.error?.message ?? `API returned ${response.status}`);
+    let body: { error?: { code?: string; message?: string } } | null = null;
+    try {
+      body = await response.json();
+    } catch {
+      /* not JSON */
+    }
+    if (body?.error?.message) throw new ApiError(body.error.code ?? "error", body.error.message);
+    throw new ApiError("http", `API returned ${response.status}`);
   }
   return (await response.json()) as T;
 }
 
-function tierFor(score: number): DrugSummary["tier"] {
+export function tierFor(score: number | null): CoverageTier {
+  if (score == null) return "Limited";
   if (score >= 75) return "Strong";
   if (score >= 55) return "Developing";
   return "Limited";
 }
 
-function titleCase(value: string) {
-  return value.toLowerCase().replace(/\b\w/g, (letter) => letter.toUpperCase());
+const profileParams = (profile: DemographicProfile) => ({
+  age: String(profile.age),
+  sex: profile.sex,
+  race: profile.race,
+  ethnicity: profile.ethnicity,
+});
+
+export function getMeta(): Promise<Meta> {
+  return request("/meta");
 }
 
-function drugName(study: Study) {
-  return titleCase((study.drug_mesh || study.drug).split(";")[0].trim().replace(/\s+/g, " "));
+export function getDashboard(
+  params: { query?: string; sort?: string; order?: string; limit?: number } = {},
+): Promise<DrugSummary[]> {
+  const query = new URLSearchParams(
+    Object.entries(params)
+      .filter(([, value]) => value !== undefined && value !== "")
+      .map(([key, value]) => [key, String(value)]),
+  );
+  return request(`/drugs?${query}`);
 }
 
-function raceCategory(race: DemographicProfile["race"]) {
-  const categories: Partial<Record<DemographicProfile["race"], string>> = {
-    "American Indian or Alaska Native": "aian",
-    Asian: "asian",
-    "Black or African American": "black",
-    Multiracial: "multiracial",
-    "Native Hawaiian or Pacific Islander": "nhpi",
-    White: "white",
-  };
-  return categories[race];
+export function searchDrugs(filters: SearchFilters): Promise<DrugSummary[]> {
+  const params = new URLSearchParams(
+    Object.entries(filters)
+      .filter(([, value]) => value !== "")
+      .map(([key, value]) => [key, String(value)]),
+  );
+  return request(`/search?${params}`);
 }
 
-function searchParams(profile?: DemographicProfile, filters?: Partial<SearchFilters>) {
-  const params = new URLSearchParams({ limit: "200" });
-  if (filters?.drug) params.set("drug", filters.drug.trim());
-  if (filters?.indication) params.set("condition", filters.indication.trim());
-  if (profile && profile.age >= 0) params.set("age", String(profile.age));
-  if (profile?.sex === "Female") params.set("sex", "F");
-  if (profile?.sex === "Male") params.set("sex", "M");
-  const race = profile ? raceCategory(profile.race) : undefined;
-  if (race) params.set("race", race);
-  return params;
+export function suggest(query: string): Promise<string[]> {
+  return request(`/suggest?q=${encodeURIComponent(query)}`);
 }
 
-function leastSex(rows: Study[]) {
-  const reported = rows.filter((row) => row.female_count !== null && row.male_count !== null);
-  if (!reported.length) return "Sex enrollment unavailable";
-  const female = reported.reduce((sum, row) => sum + (row.female_count ?? 0), 0);
-  const male = reported.reduce((sum, row) => sum + (row.male_count ?? 0), 0);
-  return female === male ? "Female and male participants (tied)" : female < male ? "Female participants" : "Male participants";
+export function getDrugReport(drugId: string, profile: DemographicProfile): Promise<DrugReport> {
+  const params = new URLSearchParams(profileParams(profile));
+  return request(`/drugs/${encodeURIComponent(drugId)}/report?${params}`);
 }
 
-function leastRace(rows: Study[]) {
-  const totals = new Map<string, number>();
-  const labels = new Map<string, string>();
-  for (const row of rows) for (const race of row.race_composition) {
-    if (race.dimension !== "race" || race.category === "unknown") continue;
-    totals.set(race.category, (totals.get(race.category) ?? 0) + race.count);
-    labels.set(race.category, race.demographic);
-  }
-  if (totals.size < 2) return "Insufficient race-group data";
-  const lowest = Math.min(...totals.values());
-  const groups = [...totals].filter(([, count]) => count === lowest).map(([category]) => labels.get(category) ?? category);
-  return groups.length > 1 ? `${groups.join(", ")} (tied)` : `${groups[0]} participants (reported)`;
-}
+export const pct = (value: number | null | undefined, digits = 0) =>
+  value == null ? "—" : `${(100 * value).toFixed(digits)}%`;
 
-function leastAge(rows: Study[]) {
-  const bands = [
-    { label: "Children (<18)", min: 0, max: 17 },
-    { label: "Adults (18-64)", min: 18, max: 64 },
-    { label: "Adults 65+", min: 65, max: 100 },
-  ].map((band) => ({
-    ...band,
-    count: rows.filter((row) => (row.age_lower ?? 0) <= band.max && (row.age_upper ?? 100) >= band.min).length,
-  }));
-  const lowest = Math.min(...bands.map((band) => band.count));
-  const groups = bands.filter((band) => band.count === lowest).map((band) => band.label);
-  return groups.length > 1 ? `${groups.join(", ")} eligibility (tied)` : `${groups[0]} eligibility`;
-}
+export const BAND_LABEL: Record<string, string> = {
+  very_under: "Very under-represented",
+  under: "Under-represented",
+  adequate: "Represented",
+  over: "Over-represented",
+  not_reported: "Not reported",
+  na_by_design: "Not applicable by design",
+};
 
-function summarize(studies: Study[], updatedAt?: string): DrugSummary[] {
-  const groups = new Map<string, Study[]>();
-  for (const study of studies) {
-    const name = drugName(study);
-    groups.set(name, [...(groups.get(name) ?? []), study]);
-  }
-
-  return [...groups].map(([name, rows]) => {
-    const uses = rows.flatMap((row) => row.condition.split(";").map((value) => value.trim())).filter(Boolean);
-    const useCounts = new Map<string, number>();
-    uses.forEach((use) => useCounts.set(use, (useCounts.get(use) ?? 0) + 1));
-    const orderedUses = [...useCounts].sort((a, b) => b[1] - a[1]).map(([use]) => use);
-    const female = rows.reduce((sum, row) => sum + (row.female_count ?? 0), 0);
-    const male = rows.reduce((sum, row) => sum + (row.male_count ?? 0), 0);
-    const components = {
-      age: Math.round(rows.reduce((sum, row) => sum + Math.min(100, (row.age_upper ?? 100) - (row.age_lower ?? 0)), 0) / rows.length),
-      sex: female && male ? Math.round((Math.min(female, male) / Math.max(female, male)) * 100) : Math.round((rows.filter((row) => row.sex === "MF").length / rows.length) * 100),
-      race: Math.round((rows.filter((row) => row.race_reported).length / rows.length) * 100),
-    };
-    const weakest = Object.entries(components).sort((a, b) => a[1] - b[1])[0][0];
-    const leastResearched = weakest === "age"
-      ? { dimension: "Age" as const, group: leastAge(rows) }
-      : weakest === "sex"
-        ? { dimension: "Sex" as const, group: leastSex(rows) }
-        : { dimension: "Race" as const, group: leastRace(rows) };
-    const score = Math.round((components.age + components.sex + components.race) / 3);
-    return {
-      id: name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, ""),
-      name,
-      primaryUse: orderedUses[0] ? titleCase(orderedUses[0]) : "Use not reported",
-      otherUses: orderedUses.slice(1, 8).map(titleCase),
-      leastResearched,
-      score,
-      tier: tierFor(score),
-      components,
-      trialCount: rows.length,
-      participantCount: rows.reduce((sum, row) => sum + row.participants, 0),
-      updatedAt: updatedAt ?? "Not reported",
-    };
-  });
-}
-
-export async function getStats(): Promise<BackendStats> {
-  return request<BackendStats>("/api/studies/stats");
-}
-
-export async function getDashboard(): Promise<DashboardData> {
-  const [result, stats] = await Promise.all([
-    request<StudyList>("/api/studies?limit=200"),
-    request<BackendStats>("/api/studies/stats"),
-  ]);
-  return { drugs: summarize(result.studies, stats.ingest?.loaded_at), stats };
-}
-
-export async function searchDrugs(filters: SearchFilters): Promise<DrugSummary[]> {
-  const params = searchParams(filters, filters);
-  const result = await request<StudyList>(`/api/studies?${params}`);
-  return summarize(result.studies);
-}
-
-export async function getDrugReport(drugId: string, profile: DemographicProfile): Promise<DrugReport> {
-  const drugQuery = drugId.replace(/-/g, "%");
-  const allParams = searchParams(undefined, { drug: drugQuery });
-  const profileParams = searchParams(profile, { drug: drugQuery });
-  const [allStudies, matching, aggregate] = await Promise.all([
-    request<StudyList>(`/api/studies?${allParams}`),
-    request<StudyList>(`/api/studies?${profileParams}`),
-    request<Aggregate>(`/api/studies/aggregate?${profileParams}`),
-  ]);
-  const drug = summarize(allStudies.studies)[0] ?? summarize(matching.studies)[0];
-  if (!drug) throw new Error(`No studies found for ${drugId.replace(/-/g, " ")}.`);
-
-  const category = raceCategory(profile.race);
-  const raceCount = aggregate.race_composition.find((item) => item.dimension === "race" && item.category === category)?.count ?? 0;
-  const raceTotal = aggregate.race_composition.filter((item) => item.dimension === "race").reduce((sum, item) => sum + item.count, 0);
-  const raceScore = raceTotal ? Math.min(100, Math.round((raceCount / raceTotal) * 500)) : drug.components.race;
-  const personalizedScore = Math.round((drug.components.age + drug.components.sex + raceScore) / 3);
-  const lower = aggregate.age_range[0] ?? 0;
-  const upper = aggregate.age_range[1];
-  const ageNote = aggregate.studies === 0 ? "No matching studies set an age envelope." : upper === null
-    ? `Eligibility starts as low as age ${lower}; at least one study has no upper age limit.`
-    : `Eligibility spans ages ${lower} to ${upper} across matching studies.`;
-
-  return {
-    drug: { ...drug, trialCount: allStudies.total },
-    profile,
-    personalizedScore,
-    summary: `${matching.total} completed Phase III studies match ${drug.name} and the selected profile. ${aggregate.studies_reporting_race} report race composition.`,
-    strengths: [
-      `${aggregate.participants.toLocaleString()} participants are represented in the matching evidence.`,
-      `${aggregate.studies_reporting_race} matching studies report race composition.`,
-      ageNote,
-    ],
-    gaps: [
-      `${Math.max(0, aggregate.studies - aggregate.studies_reporting_race)} matching studies do not report race composition.`,
-      "Age reflects protocol eligibility ranges, not the observed ages of participants.",
-    ],
-    fdaContext: {
-      indication: drug.primaryUse,
-      labelUpdated: "Not available",
-      note: "The SQLite backend contains ClinicalTrials.gov data only; FDA labeling is not connected.",
-      sourceUrl: "https://open.fda.gov/apis/drug/label/",
-    },
-    evidence: matching.studies.slice(0, 8).map((study) => ({
-      id: study.nct_id,
-      title: `${study.drug} — ${study.condition}`,
-      phase: "Phase III",
-      status: "Completed",
-      enrollment: study.participants,
-      match: study.race_reported ? "Race reported" : "Race not reported",
-      sourceUrl: study.source_url,
-    })),
-  };
+export function reportPath(drugId: string, profile: DemographicProfile) {
+  return `/report/${encodeURIComponent(drugId)}?${new URLSearchParams(profileParams(profile))}`;
 }
